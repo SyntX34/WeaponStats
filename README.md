@@ -117,3 +117,7 @@ For issues, feature requests, or questions, please open an issue on the project 
 ## Credits
 - [SourceMod](https://www.sourcemod.net/) - The plugin framework used for this project.
 - [DiscordWebhookAPI](https://github.com/srcdslab/sm-plugin-DiscordWebhookAPI) - The plugin used for Discord webhook integration.
+- [Denied](https://github.com/RealDenied) - Idea from him.
+
+![Image](image.png)
+![Image](20251003205336_1.jpg)
