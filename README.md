@@ -102,7 +102,7 @@ The plugin includes a comprehensive API that allows other plugins to access Weap
 - `WS_GetWeaponHits(client, index)` - Get hits for weapon at index
 - `WS_GetWeaponHeadshots(client, index)` - Get headshots for weapon at index
 
-A test plugin ([testws.smx](plugins\testws.smx)) is included to verify that all natives are working correctly. Use the `sm_testws` command to test the API functionality.
+A test plugin ([testws.smx](plugins/testws.smx)) is included to verify that all natives are working correctly. Use the `sm_testws` command to test the API functionality.
 
 ## How to Detect a Cheater
 The plugin automatically detects cheaters by analyzing various behavioral patterns:
@@ -124,10 +124,10 @@ When suspicious behavior is detected, the plugin:
 
 ## Installation
 1. Compile the .sp file and place the resulting .smx file in your `addons/sourcemod/plugins/` directory
-2. Place the [weaponstats.phrases.txt](translations\weaponstats.phrases.txt) file in your `addons/sourcemod/translations/` directory
+2. Place the [weaponstats.phrases.txt](translations/weaponstats.phrases.txt) file in your `addons/sourcemod/translations/` directory
 3. Restart the server or load the plugin
 4. Configure the ConVars in `cfg/sourcemod/weaponstats.cfg` as needed
-5. (Optional) Install the test plugin ([testws.smx](plugins\testws.smx)) to verify API functionality
+5. (Optional) Install the test plugin ([testws.smx](plugins/testws.smx)) to verify API functionality
 
 ## Requirements
 - SourceMod 1.10 or higher
