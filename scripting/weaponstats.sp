@@ -8,7 +8,7 @@
 #include <discordWebhookAPI>
 #include <weaponstats>
 
-#define PLUGIN_VERSION "1.8"
+#define PLUGIN_VERSION "1.9"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
@@ -2203,7 +2203,7 @@ public any Native_GetSuspicionLevel(Handle plugin, int numParams)
         - Updated debug prints and convar change hooks to include new vars.
         - No changes to stat tracking, commands, or notifications—focus was on detection logic only.
 
- * Version 1.8 - Added Native Support and Optimized Detection.
+ * Version 1.9 - Added Native Support and Optimized Detection.
         - Added `weaponstats.inc` include file for native support, enabling other plugins to query detection statuses and suspicion levels.
         - Introduced new global natives for external plugins:
         - `WS_IsSilentAimDetected`: Checks if silent aim was detected for a client.
