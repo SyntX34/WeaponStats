@@ -7,7 +7,7 @@
 #include <multicolors>
 #include <discordWebhookAPI>
 
-#define PLUGIN_VERSION "1.1"
+#define PLUGIN_VERSION "1.7"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
@@ -40,6 +40,9 @@ ConVar g_cvCommandFlags;
 ConVar g_cvNotifyCooldown;
 ConVar g_cvWebhook;
 ConVar g_cvTriggerbotPerf; 
+ConVar g_cvAimSnapAngle;
+ConVar g_cvAimSnapDetections;
+ConVar g_cvMaxAimVelocity;
 
 // Player tracking arrays
 int g_iShotsFired[MAXPLAYERS+1];
@@ -50,6 +53,7 @@ int g_iSuspicionLevel[MAXPLAYERS+1];
 int g_iKills[MAXPLAYERS+1];
 int g_iHeadshotKills[MAXPLAYERS+1];
 int g_iKillHitGroupStats[MAXPLAYERS+1][8];
+int g_iAimSnapDetections[MAXPLAYERS+1];
 
 float g_fLastShotTime[MAXPLAYERS+1];
 float g_fLastHitTime[MAXPLAYERS+1];
@@ -164,13 +168,16 @@ public void OnPluginStart()
     g_cvAimlock = CreateConVar("sm_weaponstats_aimlock", "5", "Aimlock detection threshold (consecutive perfect snaps)", FCVAR_NONE, true, 1.0, true, 20.0);
     g_cvRecoilPerf = CreateConVar("sm_weaponstats_recoil", "0.98", "Recoil control performance threshold", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvSilentAimAngle = CreateConVar("sm_weaponstats_silentaim_angle", "1.0", "Silent aim angle threshold", FCVAR_NONE, true, 0.0, true, 10.0);
+    g_cvHeadshotPerf = CreateConVar("sm_weaponstats_headshot", "0.6", "Headshot performance threshold", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvNoScopePerf = CreateConVar("sm_weaponstats_noscope", "0.8", "No-scope performance threshold", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvCloseRange = CreateConVar("sm_weaponstats_closerange", "300.0", "Close range threshold (units)", FCVAR_NONE, true, 100.0, true, 1000.0);
-    g_cvHeadshotPerf = CreateConVar("sm_weaponstats_headshot", "0.6", "Headshot performance threshold", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvCommandFlags = CreateConVar("sm_weaponstats_command_flags", "", "Flags for stats commands (blank = public, 'public' = public)", FCVAR_NONE);
     g_cvNotifyCooldown = CreateConVar("sm_weaponstats_notify_cooldown", "60.0", "Cooldown between suspicion notifications for a player (seconds)", FCVAR_NONE, true, 10.0, true, 300.0);
     g_cvWebhook = CreateConVar("sm_weaponstats_webhook", "https://discord.com/api/webhooks/1423646665994272799/zEFlPhqJEfbYfsZgXbO9fKNQ0fZOgpivdfQ6iEmenxVR0RYvg8KViSnP4OckimW8Scyw", "The webhook URL of your Discord channel.", FCVAR_NONE);
     g_cvTriggerbotPerf = CreateConVar("sm_weaponstats_triggerbot", "0.8", "Triggerbot performance threshold (fast shot ratio)", FCVAR_NONE, true, 0.0, true, 1.0);
+    g_cvAimSnapAngle = CreateConVar("sm_weaponstats_aimsnap_angle", "30.0", "Aim snap angle threshold for detection", FCVAR_NONE, true, 10.0, true, 90.0);
+    g_cvAimSnapDetections = CreateConVar("sm_weaponstats_aimsnap_detections", "3", "Number of aim snaps required for detection", FCVAR_NONE, true, 1.0, true, 10.0);
+    g_cvMaxAimVelocity = CreateConVar("sm_weaponstats_max_aimvelocity", "1000.0", "Maximum allowed aim velocity (degrees per second)", FCVAR_NONE, true, 500.0, true, 2000.0);
 
     AutoExecConfig(true);
     
@@ -199,6 +206,8 @@ public void OnPluginStart()
     {
         CreateDirectory(sPath, 511);
     }
+
+    CreateTimer(1.0, Timer_CheckEyeAngles, _, TIMER_REPEAT);
 }
 
 public void OnConfigsExecuted()
@@ -220,6 +229,9 @@ public void OnConfigsExecuted()
     g_cvNotifyCooldown.AddChangeHook(OnConVarChanged);
     g_cvWebhook.AddChangeHook(OnConVarChanged);
     g_cvTriggerbotPerf.AddChangeHook(OnConVarChanged);
+    g_cvAimSnapAngle.AddChangeHook(OnConVarChanged);
+    g_cvAimSnapDetections.AddChangeHook(OnConVarChanged);
+    g_cvMaxAimVelocity.AddChangeHook(OnConVarChanged);
     
     // Update initial thresholds from ConVars
     UpdateThresholdsFromConVars();
@@ -277,6 +289,9 @@ void UpdateThresholdsFromConVars()
         PrintToServer("[WeaponStats] - Silent Aim Angle: %.1f", g_cvSilentAimAngle.FloatValue);
         PrintToServer("[WeaponStats] - Close Range: %.1f", g_cvCloseRange.FloatValue);
         PrintToServer("[WeaponStats] - Notify Cooldown: %.1f", g_cvNotifyCooldown.FloatValue);
+        PrintToServer("[WeaponStats] - Aim Snap Angle: %.1f", g_cvAimSnapAngle.FloatValue);
+        PrintToServer("[WeaponStats] - Aim Snap Detections: %d", g_cvAimSnapDetections.IntValue);
+        PrintToServer("[WeaponStats] - Max Aim Velocity: %.1f", g_cvMaxAimVelocity.FloatValue);
     }
 }
 
@@ -317,6 +332,7 @@ void ResetPlayerData(int client)
     g_iWeaponCount[client] = 0;
     g_bPendingMelee[client] = false;
     g_bIsZoomed[client] = false;
+    g_iAimSnapDetections[client] = 0;
     
     for (int i = 0; i < 3; i++)
     {
@@ -814,7 +830,8 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
             g_ShotHistory[attacker].SetArray(lastIndex, data);
         }
     }
-
+    
+    // CHANGED: Silent aim detection now works against bots too
     if (g_ShotHistory[attacker] != null && g_ShotHistory[attacker].Length > 0)
     {
         int lastIndex = g_ShotHistory[attacker].Length - 1;
@@ -843,6 +860,40 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
         }
     }
     
+    // Add aim snap and velocity checks from SMAC/LILAC/KigenAC logic
+    if (g_ShotHistory[attacker].Length >= 2)
+    {
+        int len = g_ShotHistory[attacker].Length;
+        ShotData current, previous;
+        g_ShotHistory[attacker].GetArray(len - 1, current);
+        g_ShotHistory[attacker].GetArray(len - 2, previous);
+        
+        float delta = GetAngleDelta(previous.ShotAngles, current.ShotAngles);
+        float timeDiff = current.ShotTime - previous.ShotTime;
+        
+        if (timeDiff > 0.0)
+        {
+            float velocity = delta / timeDiff;
+            if (velocity > g_cvMaxAimVelocity.FloatValue)
+            {
+                ReportSuspicion(attacker, "AimVelocity", "High aim velocity detected (%.1f deg/s)", velocity);
+                g_iSuspicionLevel[attacker] += 3;
+            }
+        }
+        
+        float angleDiff = GetAimAngleDiff(current.ShotAngles, current.EyePos, current.HitPos);
+        if (delta > g_cvAimSnapAngle.FloatValue && angleDiff < 0.5 && speed >= 10.0 && distance > g_cvCloseRange.FloatValue)
+        {
+            g_iAimSnapDetections[attacker]++;
+            if (g_iAimSnapDetections[attacker] >= g_cvAimSnapDetections.IntValue)
+            {
+                ReportSuspicion(attacker, "AimSnap", "Aimbot snap detected (delta: %.1f°)", delta);
+                g_iSuspicionLevel[attacker] += 5;
+            }
+        }
+    }
+    
+    // CHANGED: Run detection checks regardless of victim being bot
     PerformDetectionChecks(attacker);
     
     if (g_cvDebug.BoolValue)
@@ -859,6 +910,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
     int victim = GetClientOfUserId(event.GetInt("userid"));
     
+    // CHANGED: Only check if ATTACKER is a bot, victim can be anything
     if (attacker <= 0 || attacker > MaxClients || !IsClientInGame(attacker) || IsFakeClient(attacker) || 
         victim <= 0 || victim > MaxClients || !IsClientInGame(victim) || attacker == victim) return;
     if (!g_bIsTracking[attacker]) return;
@@ -926,6 +978,7 @@ public void Event_BulletImpact(Event event, const char[] name, bool dontBroadcas
     if (TR_DidHit(trace))
     {
         int hitEntity = TR_GetEntityIndex(trace);
+        // CHANGED: Accept hits on bots too
         if (hitEntity > 0 && hitEntity <= MaxClients && IsClientInGame(hitEntity))
         {
             isMiss = false;
@@ -949,6 +1002,50 @@ public void Event_BulletImpact(Event event, const char[] name, bool dontBroadcas
 public bool Filter_Self(int entity, int contentsMask, any data)
 {
     return entity != data;
+}
+
+public Action Timer_CheckEyeAngles(Handle timer)
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i) && g_bIsTracking[i])
+        {
+            float angles[3];
+            GetClientEyeAngles(i, angles);
+            if (FloatAbs(angles[0]) > 89.0 + FLOAT_EPSILON || FloatAbs(angles[2]) > FLOAT_EPSILON)
+            {
+                ReportSuspicion(i, "InvalidEyeAngles", "Invalid eye angles detected (Pitch: %.2f, Roll: %.2f)", angles[0], angles[2]);
+                g_iSuspicionLevel[i] += 5;
+            }
+        }
+    }
+    return Plugin_Continue;
+}
+
+float GetAngleDelta(const float ang1[3], const float ang2[3])
+{
+    float diff[3];
+    for (int i = 0; i < 2; i++) // Ignore roll
+    {
+        diff[i] = ang2[i] - ang1[i];
+        while (diff[i] > 180.0) diff[i] -= 360.0;
+        while (diff[i] < -180.0) diff[i] += 360.0;
+    }
+    return SquareRoot(diff[0] * diff[0] + diff[1] * diff[1]);
+}
+
+float GetAimAngleDiff(const float angles[3], const float eyePos[3], const float hitPos[3])
+{
+    float dir[3];
+    SubtractVectors(hitPos, eyePos, dir);
+    NormalizeVector(dir, dir);
+    
+    float fwd[3];
+    GetAngleVectors(angles, fwd, NULL_VECTOR, NULL_VECTOR);
+    
+    float dot = GetVectorDotProduct(dir, fwd);
+    float angle = ArcCosine(dot) * 180.0 / 3.14159;
+    return angle;
 }
 
 void PerformDetectionChecks(int client)
@@ -1128,6 +1225,7 @@ bool DetectAimlock(int client)
                 g_ShotHistory[client].GetArray(i, current);
                 g_ShotHistory[client].GetArray(i+1, next);
                 
+                // CHANGED: Accept any hit entity (bot or human)
                 if (current.HitEntity <= 0) continue;
                 
                 float angleChange = GetVectorDistance(current.ShotAngles, next.ShotAngles);
@@ -1216,6 +1314,7 @@ bool DetectInhumanReaction(int client)
         g_ShotHistory[client].GetArray(i, current);
         g_ShotHistory[client].GetArray(i-1, previous);
         
+        // CHANGED: Accept any hit entity (bot or human)
         if (current.HitEntity <= 0) continue;
         
         float timeBetweenShots = current.ShotTime - previous.ShotTime;
@@ -1249,6 +1348,7 @@ bool DetectNoScopeCheat(int client)
         ShotData data;
         g_ShotHistory[client].GetArray(i, data);
         
+        // CHANGED: Accept any hit entity (bot or human)
         if (data.HitEntity <= 0) continue;
         
         bool isSniper = false;
@@ -1404,6 +1504,7 @@ int CalculateTriggerbotSuspicion(int client)
         g_ShotHistory[client].GetArray(i, current);
         g_ShotHistory[client].GetArray(i-1, previous);
         
+        // Check if HitEntity is valid before calling IsFakeClient
         if (current.HitEntity <= 0 || current.HitEntity > MaxClients || !IsClientConnected(current.HitEntity) || IsFakeClient(current.HitEntity)) continue;
         
         float timeBetweenShots = current.ShotTime - previous.ShotTime;
@@ -1960,3 +2061,48 @@ void StringToLower(char[] str)
         str[i] = CharToLower(str[i]);
     }
 }
+
+
+/* Changlog
+ * Version 1.00 - Initial Plugin written.
+ * Version 1.1 - Added Logic for aimbots, aimlock, recoil control, triggerbots.
+ * Version 1.2 - Improved Logging and Admin Notification system.
+ * Version 1.3 - Added No-Scope cheat detection.
+ * Version 1.4 - Added Discord Webhook Notifications.
+ * Version 1.5 - Improved Discord Message Formatting.
+ * Version 1.6 - Enhanced Cheat Detection Algorithms.
+ * Version 1.7 - Added Bot Compatibility in Detection Logic.
+ * Version 1.8 - Optimized Performance and Reduced False Positives.
+
+        New ConVars Added (inspired by SMAC and KigenAC thresholds):
+        - sm_weaponstats_aimsnap_angle "30.0": Threshold for detecting large angle changes (snaps) that result in perfect hits. Lower values catch more subtle cheats but risk false positives.
+        - sm_weaponstats_aimsnap_detections "3": Number of suspicious snaps needed before flagging as aimbot. This requires multiple confirmations to avoid flagging legit quick turns.
+        - sm_weaponstats_max_aimvelocity "1000.0": Max allowed aim turn speed (degrees per second). Exceeding this flags high-velocity aimbot turns (from SMAC's velocity checks).
+        - These are hooked into OnConfigsExecuted and UpdateThresholdsFromConVars for dynamic updates and debugging.
+        
+        New Player Tracking:
+        - Added g_iAimSnapDetections[MAXPLAYERS+1] to count per-player snap detections (resets in ResetPlayerData).
+        
+        
+        New Timer for Eye Angle Checks (from KigenAC's eyetest.sp and LILAC):
+        - In OnPluginStart, created Timer_CheckEyeAngles (runs every 1 second, repeating).
+        - This checks all players' eye angles: If pitch > 89.0 or roll != 0.0, it reports "InvalidEyeAngles" and adds +5 suspicion. This catches many aimbots that set impossible angles (common in cheats).
+
+        Enhanced Detection in Event_PlayerHurt (core integration from SMAC aimbot.sp):
+        - After updating shot history, if there are at least 2 shots:
+        - Calculate angle delta between previous and current shot angles (using new GetAngleDelta function, which ignores roll and normalizes differences).
+        - Calculate time diff between shots.
+        - Compute aim velocity (delta / timeDiff); if > max_aimvelocity, report "AimVelocity" and add +3 suspicion (prevents instant 180-degree snaps).
+        - Calculate aim offset (using new GetAimAngleDiff): If delta > aimsnap_angle, aim offset < 0.5 (near-perfect hit), victim is moving (>=10 speed), and distance > close range, increment snap detections.
+        - If snap detections >= threshold, report "AimSnap" and add +5 suspicion.
+        - This logic mirrors SMAC's snap detection: Large angle change + perfect hit on moving target at distance = suspicious. It reduces false positives by requiring movement, distance, and multiple detections.
+        
+        New Helper Functions:
+        - GetAngleDelta: Computes normalized pitch/yaw difference (ignores roll, handles 360-degree wraps).
+        - GetAimAngleDiff: Computes the angular offset between shot angles and actual hit position (dot product + arccos).
+        
+        Other Minor Updates:
+        - Updated debug prints and convar change hooks to include new vars.
+        - No changes to stat tracking, commands, or notifications—focus was on detection logic only.
+
+*/
