@@ -1,7 +1,15 @@
 # WeaponStats - Advanced Aimbot Detection & Weapon Statistics Plugin
 
+<div align="center">
+  <img src="image.png" alt="WeaponStats Dashboard" width="600"/>
+</div>
+
 ## Description
 WeaponStats is a SourceMod plugin for Counter-Strike: Source that provides advanced cheat detection capabilities alongside detailed weapon statistics tracking. The plugin monitors player behavior to detect various forms of cheating including aimbots, triggerbots, silent aim, no-recoil cheats, and more, while simultaneously tracking comprehensive weapon usage statistics.
+
+<div align="center">
+  <img src="20251003205336_1.jpg" alt="WeaponStats Detection Example" width="600"/>
+</div>
 
 ## How It Works
 The plugin works by monitoring game events such as weapon fire, player hits, bullet impacts, and player deaths. It tracks each player's shooting patterns and analyzes them in real-time to identify suspicious behavior that may indicate cheating. All statistics are stored per-player and can be viewed using in-game commands.
@@ -14,6 +22,9 @@ The plugin works by monitoring game events such as weapon fire, player hits, bul
 5. **Triggerbot Detection**: Identifies inhumanly fast reaction times between seeing and shooting targets
 6. **No-Scope Detection**: Detects high accuracy and headshot rates when using scoped weapons without scoping
 7. **Statistical Anomaly Detection**: Flags when hit counts exceed shot counts
+8. **Aim Snap Detection**: Identifies suspicious large angle changes that result in perfect hits
+9. **Aim Velocity Monitoring**: Detects impossible aim turn speeds (degrees per second)
+10. **Invalid Eye Angle Detection**: Catches aimbots that set impossible angles (pitch > 89° or roll ≠ 0)
 
 ### Statistical Tracking
 The plugin tracks detailed statistics including:
@@ -32,6 +43,8 @@ The plugin tracks detailed statistics including:
 - **Admin Notifications**: Alerts admins in real-time when high suspicion levels are detected
 - **Detailed Logging**: Maintains comprehensive logs of all detections and player statistics
 - **Per-Player Tracking**: Maintains separate statistics for each player
+- **Native Support**: Exposes detection statuses and suspicion levels to other plugins
+- **Bot Compatibility**: Works with both human players and bots for comprehensive testing
 
 ## Commands
 - `sm_wstats [target]` - Display weapon statistics for yourself or a target player
@@ -61,6 +74,9 @@ The plugin creates a configuration file with the following customizable ConVars:
 | sm_weaponstats_notify_cooldown | Cooldown between suspicion notifications | 60.0 |
 | sm_weaponstats_webhook | Discord webhook URL | "https://discord.com/api/webhooks/..." |
 | sm_weaponstats_triggerbot | Triggerbot performance threshold | 0.8 |
+| sm_weaponstats_aimsnap_angle | Aim snap angle threshold | 30.0 |
+| sm_weaponstats_aimsnap_detections | Aim snap detection threshold | 3 |
+| sm_weaponstats_max_aimvelocity | Max aim velocity (degrees/sec) | 1000.0 |
 
 ## How to Detect a Cheater
 The plugin automatically detects cheaters by analyzing various behavioral patterns:
@@ -71,6 +87,8 @@ The plugin automatically detects cheaters by analyzing various behavioral patter
 4. **Perfect Recoil Control**: Players who exhibit inhumanly perfect recoil control
 5. **Aim Locking**: Players who maintain perfect aim on targets for extended periods
 6. **Statistical Impossibilities**: When hit counts exceed shot counts
+7. **Aim Snapping**: Players with suspicious large angle changes that result in perfect hits
+8. **Invalid Eye Angles**: Players with impossible eye angles (pitch > 89° or roll ≠ 0)
 
 When suspicious behavior is detected, the plugin:
 1. Logs the incident to detailed log files
@@ -80,7 +98,7 @@ When suspicious behavior is detected, the plugin:
 
 ## Installation
 1. Compile the .sp file and place the resulting .smx file in your `addons/sourcemod/plugins/` directory
-2. Place the ``weaponstats.phrases.txt`` file in your `addons/sourcemod/translations/` directory
+2. Place the [weaponstats.phrases.txt](translations/weaponstats.phrases.txt) file in your `addons/sourcemod/translations/` directory
 3. Restart the server or load the plugin
 4. Configure the ConVars in `cfg/sourcemod/weaponstats.cfg` as needed
 
@@ -103,6 +121,8 @@ When suspicious behavior is detected, the plugin:
 - In-game commands for viewing and resetting statistics
 - Support for various weapon types and hit groups
 - Debug mode for troubleshooting and fine-tuning
+- Native support for integration with other plugins
+- Bot compatibility for comprehensive testing
 
 ## Support
 For issues, feature requests, or questions, please open an issue on the project repository.
@@ -110,9 +130,8 @@ For issues, feature requests, or questions, please open an issue on the project 
 ## Notes
 - The plugin is intended for use with Counter-Strike: Source and may not work with other games as it is not tested with them.
 - It is recommended to use the latest version of SourceMod and the plugin to ensure compatibility and stability.
-- Not every logics to detect cheaters is implemented and accurate.
+- Not every logic to detect cheaters is implemented and accurate.
 - Before banning a player after he was detected as a cheater by this plugin, think about the consequences.
-
 
 ## Credits
 - [SourceMod](https://www.sourcemod.net/) - The plugin framework used for this project.
