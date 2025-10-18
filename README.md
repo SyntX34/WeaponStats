@@ -25,6 +25,11 @@ The plugin works by monitoring game events such as weapon fire, player hits, bul
 8. **Aim Snap Detection**: Identifies suspicious large angle changes that result in perfect hits
 9. **Aim Velocity Monitoring**: Detects impossible aim turn speeds (degrees per second)
 10. **Invalid Eye Angle Detection**: Catches aimbots that set impossible angles (pitch > 89° or roll ≠ 0)
+11. **SMAC/LILAC-Inspired Aim Consistency Checks**: Detects unnatural aim patterns with configurable thresholds
+12. **Smoothness Analysis**: Identifies overly smooth aim movements characteristic of aimbots
+13. **Perfect Aim Detection**: Flags consecutive perfect aim frames
+14. **Trace Cheat Detection**: Catches shooting through walls and obstacles
+15. **Enhanced Reaction Time Analysis**: Improved inhuman reaction detection with distance scaling
 
 ### Statistical Tracking
 The plugin tracks detailed statistics including:
@@ -51,7 +56,36 @@ The plugin tracks detailed statistics including:
 - `sm_weaponstats [target]` - Alias for sm_wstats
 - `sm_wresetstats [target]` - Reset weapon statistics for yourself or a target player
 - `sm_resetweaponstats [target]` - Alias for sm_wresetstats
+- `sm_observeweaponstats [target]` - Observe weapon statistics of a player with advanced visualization
+- `sm_obsweapon [target]` - Alias for sm_observeweaponstats
+- `sm_stopobserving` - Stop observing weapon statistics
 - `sm_testws [target]` - Test WeaponStats natives and display player stats (included test plugin)
+
+## Advanced Observer System
+Version 1.11 introduces an enhanced observer system with advanced visualization features:
+
+### Features
+- **Persistent Transparency**: Transparency now persists through damage events, death, respawns, and round changes
+- **Continuous Observation**: Observations continue through player death and round transitions
+- **Smart State Management**: Automatic transparency restoration after respawns and round starts
+- **Improved Observer Tracking**: Better handling of observer-target relationships
+- **Visual Feedback**: Clear notifications when observed targets die or respawn
+- **Continuous Monitoring**: Uninterrupted observation through game state changes
+- **Detailed Console Stats**: Enhanced weapon statistics and damage breakdowns
+- **Real-time Hit Information**: Immediate feedback on hit locations and damage
+
+### Visualization Features
+- **Server-Side Hitbox Display**: Implements `sv_showimpacts 1`, `sv_showplayerhitboxes 1`, and `sv_showlagcompensation 1` functionality without requiring `sv_cheats 1`
+- **3D Hitbox Outlines**: Creates accurate 3D boxes around damaged body parts with colored edges
+- **Real-time Impact Points**: Shows exact hit locations with glowing markers and crosshairs
+- **Bullet Trail Visualization**: Displays complete bullet paths from attacker to victim
+- **Color-Coded Hitgroups**: Unique colors for each body part:
+  - 🔴 **Red**: Headshots
+  - 🟡 **Yellow**: Chest hits  
+  - 🟠 **Orange**: Stomach hits
+  - 🟢 **Green**: Arm hits
+  - 🔵 **Blue**: Leg hits
+  - ⚪ **White**: Generic hits
 
 ## Configuration
 The plugin creates a configuration file with the following customizable ConVars:
@@ -78,6 +112,13 @@ The plugin creates a configuration file with the following customizable ConVars:
 | sm_weaponstats_aimsnap_angle | Aim snap angle threshold | 30.0 |
 | sm_weaponstats_aimsnap_detections | Aim snap detection threshold | 3 |
 | sm_weaponstats_max_aimvelocity | Max aim velocity (degrees/sec) | 1000.0 |
+| sm_weaponstats_tracerduration | How long tracers stay visible | 3.0 |
+| sm_weaponstats_glowdistance | Maximum glow visibility distance | 1000.0 |
+| sm_weaponstats_observer_adminflag | Admin flag required for observer commands | "" |
+| sm_weaponstats_aim_consistency | Aim consistency threshold | 0.85 |
+| sm_weaponstats_aim_time | Minimum time between aim checks | 0.1 |
+| sm_weaponstats_max_angle | Maximum allowed angle change per second | 45.0 |
+| sm_weaponstats_smoothness | Smoothness threshold for human-like aim | 0.95 |
 
 ## API/Natives for Developers
 The plugin includes a comprehensive API that allows other plugins to access WeaponStats data and detection statuses:
@@ -115,6 +156,10 @@ The plugin automatically detects cheaters by analyzing various behavioral patter
 6. **Statistical Impossibilities**: When hit counts exceed shot counts
 7. **Aim Snapping**: Players with suspicious large angle changes that result in perfect hits
 8. **Invalid Eye Angles**: Players with impossible eye angles (pitch > 89° or roll ≠ 0)
+9. **Aim Consistency**: Players with unnatural aim patterns
+10. **Smoothness**: Players with overly smooth aim movements
+11. **Perfect Aim Frames**: Players with consecutive perfect aim frames
+12. **Trace Cheats**: Players shooting through walls and obstacles
 
 When suspicious behavior is detected, the plugin:
 1. Logs the incident to detailed log files
@@ -151,6 +196,12 @@ When suspicious behavior is detected, the plugin:
 - Native support for integration with other plugins
 - Bot compatibility for comprehensive testing
 - API testing plugin included for verification
+- Advanced observer system with hitbox visualization
+- Server-side hitbox display without sv_cheats
+- Color-coded hitgroup visualization
+- Bullet trail visualization
+- Persistent transparency system
+- Continuous observation through game state changes
 
 ## Support
 For issues, feature requests, or questions, please open an issue on the project repository.

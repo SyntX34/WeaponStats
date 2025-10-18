@@ -3,22 +3,25 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <sdkhooks>
 #include <cstrike>
 #include <multicolors>
 #include <discordWebhookAPI>
-#include <weaponstats>
+#include <clientprefs>
 
-#define PLUGIN_VERSION "1.10"
+#define PLUGIN_VERSION "1.11"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
 #define FLOAT_EPSILON 0.001
+#define MAX_TRACERS 32
+#define GLOW_OFFSET 14
 
 public Plugin myinfo = 
 {
-    name = "Advanced Aimbot Detection & Weapon Stats (CS:S)",
+    name = "Advanced Aimbot Detection & Weapon Stats Observer (CS:S)",
     author = "+SyntX34",
-    description = "Detects aimbot usage and tracks detailed weapon statistics for CS:Source",
+    description = "Detects aimbot usage and provides advanced spectator weapon statistics with visualization for CS:Source",
     version = PLUGIN_VERSION,
     url = "https://github.com/SyntX34 && https://steamcommunity.com/id/SyntX34"
 };
@@ -44,6 +47,13 @@ ConVar g_cvTriggerbotPerf;
 ConVar g_cvAimSnapAngle;
 ConVar g_cvAimSnapDetections;
 ConVar g_cvMaxAimVelocity;
+ConVar g_cvTracerDuration;
+ConVar g_cvGlowDistance;
+ConVar g_cvObserverAdminFlag;
+ConVar g_cvAimConsistency;
+ConVar g_cvAimTimeThreshold;
+ConVar g_cvMaxAngleChange;
+ConVar g_cvSmoothnessThreshold;
 
 // Player tracking arrays
 int g_iShotsFired[MAXPLAYERS+1];
@@ -55,29 +65,47 @@ int g_iKills[MAXPLAYERS+1];
 int g_iHeadshotKills[MAXPLAYERS+1];
 int g_iKillHitGroupStats[MAXPLAYERS+1][8];
 int g_iAimSnapDetections[MAXPLAYERS+1];
-
+int g_iGlowEntity[MAXPLAYERS + 1] = {INVALID_ENT_REFERENCE, ...};
+int g_bObserving[MAXPLAYERS + 1];
+int g_iObservedTarget[MAXPLAYERS + 1];
+int g_iTColor[4] = {255, 50, 50, 255};     
+int g_iCTColor[4] = {50, 50, 255, 255};     
+int g_iTracerColor[4] = {255, 255, 0, 255}; 
+int g_iWeaponShots[MAXPLAYERS+1][MAX_WEAPONS];
+int g_iWeaponHits[MAXPLAYERS+1][MAX_WEAPONS];
+int g_iWeaponHeadshots[MAXPLAYERS+1][MAX_WEAPONS];
+int g_iWeaponCount[MAXPLAYERS+1];
+int g_iAimHistoryIndex[MAXPLAYERS+1];
+int g_iPerfectAimFrames[MAXPLAYERS+1];
+int g_iTransparentPlayers[MAXPLAYERS+1][MAXPLAYERS+1];
+int g_iHitGroupStats[MAXPLAYERS+1][8];
+int g_iHitPositionIndex[MAXPLAYERS+1];
 float g_fLastShotTime[MAXPLAYERS+1];
 float g_fLastHitTime[MAXPLAYERS+1];
 float g_fLastNotifyTime[MAXPLAYERS+1];
 float g_vLastAngles[MAXPLAYERS+1][3];
 float g_vHitPositions[MAXPLAYERS+1][SAMPLE_SIZE][3];
-int g_iHitPositionIndex[MAXPLAYERS+1];
+float g_fLastAimCheckTime[MAXPLAYERS+1];
+float g_vLastAimAngles[MAXPLAYERS+1][3];
+float g_vAimHistory[MAXPLAYERS+1][10][3];
+float g_fLastHitboxTime[MAXPLAYERS+1][MAXPLAYERS+1];
 bool g_bIsZoomed[MAXPLAYERS+1];
 bool g_bIsTracking[MAXPLAYERS+1];
 bool g_bPendingMelee[MAXPLAYERS+1];
-int g_iHitGroupStats[MAXPLAYERS+1][8];
-char g_sWeaponNames[MAXPLAYERS+1][MAX_WEAPONS][64];
-int g_iWeaponShots[MAXPLAYERS+1][MAX_WEAPONS];
-int g_iWeaponHits[MAXPLAYERS+1][MAX_WEAPONS];
-int g_iWeaponHeadshots[MAXPLAYERS+1][MAX_WEAPONS];
-int g_iWeaponCount[MAXPLAYERS+1];
-
+bool g_bTransparencyApplied[MAXPLAYERS+1];
 bool g_bSilentAimDetected[MAXPLAYERS+1];
 bool g_bAimbotDetected[MAXPLAYERS+1];
 bool g_bRecoilDetected[MAXPLAYERS+1];
 bool g_bAimlockDetected[MAXPLAYERS+1];
 bool g_bTriggerbotDetected[MAXPLAYERS+1];
 bool g_bNoScopeDetected[MAXPLAYERS+1];
+bool g_bHitboxDebug[MAXPLAYERS + 1];
+char g_sWeaponNames[MAXPLAYERS+1][MAX_WEAPONS][64];
+ArrayList g_hObservers[MAXPLAYERS + 1];
+ArrayList g_hTracers[MAXPLAYERS + 1];
+ArrayList g_ShotHistory[MAXPLAYERS+1];
+Handle g_hObserverCookie;
+Handle g_hDamageTrie;
 
 enum struct ShotData {
     float ShotTime;
@@ -93,7 +121,12 @@ enum struct ShotData {
     float Distance;
 }
 
-ArrayList g_ShotHistory[MAXPLAYERS+1];
+enum struct TracerData
+{
+    float startPos[3];
+    float endPos[3];
+    float timestamp;
+}
 
 char g_sHitgroupNames[][] = {
     "Generic",
@@ -110,7 +143,8 @@ char g_sScopedWeapons[][] = {
     "awp",
     "scout",
     "sg550",
-    "g3sg1"
+    "g3sg1",
+    "scar20"
 };
 
 char g_sHighAccuracyWeapons[][] = {
@@ -123,7 +157,35 @@ char g_sHighAccuracyWeapons[][] = {
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
+    EngineVersion engine = GetEngineVersion();
+    if (engine != Engine_CSS)
+    {
+        strcopy(error, err_max, "This plugin is for Counter-Strike: Source only.");
+        return APLRes_Failure;
+    }
+    
     RegPluginLibrary("WeaponStats");
+    
+    CreateNative("WS_IsSilentAimDetected", Native_IsSilentAimDetected);
+    CreateNative("WS_IsAimbotDetected", Native_IsAimbotDetected);
+    CreateNative("WS_IsRecoilDetected", Native_IsRecoilDetected);
+    CreateNative("WS_IsAimlockDetected", Native_IsAimlockDetected);
+    CreateNative("WS_IsTriggerbotDetected", Native_IsTriggerbotDetected);
+    CreateNative("WS_IsNoScopeDetected", Native_IsNoScopeDetected);
+    CreateNative("WS_GetSuspicionLevel", Native_GetSuspicionLevel);
+    CreateNative("WS_GetShotsFired", Native_GetShotsFired);
+    CreateNative("WS_GetShotsHit", Native_GetShotsHit);
+    CreateNative("WS_GetHeadshots", Native_GetHeadshots);
+    CreateNative("WS_GetAccuracy", Native_GetAccuracy);
+    CreateNative("WS_GetHeadshotRatio", Native_GetHeadshotRatio);
+    CreateNative("WS_GetKills", Native_GetKills);
+    CreateNative("WS_GetHeadshotKills", Native_GetHeadshotKills);
+    CreateNative("WS_GetWeaponCount", Native_GetWeaponCount);
+    CreateNative("WS_GetWeaponName", Native_GetWeaponName);
+    CreateNative("WS_GetWeaponShots", Native_GetWeaponShots);
+    CreateNative("WS_GetWeaponHits", Native_GetWeaponHits);
+    CreateNative("WS_GetWeaponHeadshots", Native_GetWeaponHeadshots);
+    
     return APLRes_Success;
 }
 
@@ -155,7 +217,6 @@ stock char[] HostIP()
     {
         strcopy(sPort, sizeof(sPort), "Unknown");
     }
-
     Format(sResult, sizeof(sResult), "%s:%s", sIP, sPort);
     return sResult;
 }
@@ -166,7 +227,7 @@ public void OnPluginStart()
     
     CreateConVar("sm_weaponstats_version", PLUGIN_VERSION, "Plugin Version", FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY);
     
-    g_cvEnabled = CreateConVar("sm_weaponstats_enable", "1", "Enable/Disable the aimbot detection plugin", FCVAR_NONE, true, 0.0, true, 1.0);
+    g_cvEnabled = CreateConVar("sm_weaponstats_enable", "1", "Enable/Disable the plugin", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvDebug = CreateConVar("sm_weaponstats_debug", "1", "Enable debug mode", FCVAR_NONE, true, 0.0, true, 1.0);
     g_cvAdminFlags = CreateConVar("sm_weaponstats_adminflags", "z", "Admin flags to receive warnings (default: z - root)");
     g_cvSilentAimPerf = CreateConVar("sm_weaponstats_silentaim", "0.95", "Silent aim performance threshold", FCVAR_NONE, true, 0.0, true, 1.0);
@@ -186,19 +247,34 @@ public void OnPluginStart()
     g_cvAimSnapAngle = CreateConVar("sm_weaponstats_aimsnap_angle", "30.0", "Aim snap angle threshold for detection", FCVAR_NONE, true, 10.0, true, 90.0);
     g_cvAimSnapDetections = CreateConVar("sm_weaponstats_aimsnap_detections", "3", "Number of aim snaps required for detection", FCVAR_NONE, true, 1.0, true, 10.0);
     g_cvMaxAimVelocity = CreateConVar("sm_weaponstats_max_aimvelocity", "1000.0", "Maximum allowed aim velocity (degrees per second)", FCVAR_NONE, true, 500.0, true, 2000.0);
-
-    AutoExecConfig(true);
+    g_cvTracerDuration = CreateConVar("sm_weaponstats_tracerduration", "3.0", "How long tracers stay visible", FCVAR_NONE, true, 1.0, true, 10.0);
+    g_cvGlowDistance = CreateConVar("sm_weaponstats_glowdistance", "1000.0", "Maximum glow visibility distance", FCVAR_NONE, true, 100.0, true, 5000.0);
+    g_cvObserverAdminFlag = CreateConVar("sm_weaponstats_observer_adminflag", "", "Admin flag required for observer commands (blank for public)");
+    g_cvAimConsistency = CreateConVar("sm_weaponstats_aim_consistency", "0.85", "Aim consistency threshold for detection", FCVAR_NONE, true, 0.0, true, 1.0);
+    g_cvAimTimeThreshold = CreateConVar("sm_weaponstats_aim_time", "0.1", "Minimum time between aim checks", FCVAR_NONE, true, 0.01, true, 1.0);
+    g_cvMaxAngleChange = CreateConVar("sm_weaponstats_max_angle", "45.0", "Maximum allowed angle change per second", FCVAR_NONE, true, 10.0, true, 180.0);
+    g_cvSmoothnessThreshold = CreateConVar("sm_weaponstats_smoothness", "0.95", "Smoothness threshold for human-like aim", FCVAR_NONE, true, 0.0, true, 1.0);
+    
+    AutoExecConfig(true, "weaponstats");
     
     RegConsoleCmd("sm_wstats", Command_WeaponStats, "Show weapon statistics for a player");
     RegConsoleCmd("sm_weaponstats", Command_WeaponStats, "Show weapon statistics for a player");
     RegConsoleCmd("sm_wresetstats", Command_ResetStats, "Reset weapon statistics for a player");
     RegConsoleCmd("sm_resetweaponstats", Command_ResetStats, "Reset weapon statistics for a player");
+    RegConsoleCmd("sm_observeweaponstats", Command_ObserveWeaponStats, "Observe weapon statistics of a player");
+    RegConsoleCmd("sm_obsweapon", Command_ObserveWeaponStats, "Observe weapon statistics of a player");
+    RegConsoleCmd("sm_stopobserving", Command_StopObserving, "Stop observing weapon statistics");
     
     HookEvent("weapon_fire", Event_WeaponFire);
     HookEvent("player_hurt", Event_PlayerHurt);
     HookEvent("player_death", Event_PlayerDeath);
     HookEvent("bullet_impact", Event_BulletImpact);
     HookEvent("weapon_zoom", Event_WeaponZoom);
+    HookEvent("round_start", Event_RoundStart);
+    HookEvent("round_end", Event_RoundEnd);
+    HookEvent("player_team", Event_PlayerTeam);
+    HookEvent("player_spawn", Event_PlayerSpawn);
+    g_hDamageTrie = CreateTrie();
     
     for (int i = 1; i <= MaxClients; i++)
     {
@@ -207,40 +283,35 @@ public void OnPluginStart()
             OnClientPutInServer(i);
         }
     }
-
+    
     char sPath[PLATFORM_MAX_PATH];
     BuildPath(Path_SM, sPath, sizeof(sPath), "logs/WeaponStats");
     if (!DirExists(sPath))
     {
         CreateDirectory(sPath, 511);
     }
-
+    
+    g_hObserverCookie = RegClientCookie("observeweaponstats_prefs", "Observer preferences", CookieAccess_Private);
+    
+    for (int i = 0; i <= MAXPLAYERS; i++)
+    {
+        g_hObservers[i] = new ArrayList();
+        g_hTracers[i] = new ArrayList(sizeof(TracerData));
+    }
+    
     CreateTimer(1.0, Timer_CheckEyeAngles, _, TIMER_REPEAT);
+    CreateTimer(1.0, Timer_CleanupTracers, _, TIMER_REPEAT);
+    CreateTimer(0.1, Timer_UpdateAimHistory, _, TIMER_REPEAT);
+}
 
-    CreateNative("WS_IsSilentAimDetected", Native_IsSilentAimDetected);
-    CreateNative("WS_IsAimbotDetected", Native_IsAimbotDetected);
-    CreateNative("WS_IsRecoilDetected", Native_IsRecoilDetected);
-    CreateNative("WS_IsAimlockDetected", Native_IsAimlockDetected);
-    CreateNative("WS_IsTriggerbotDetected", Native_IsTriggerbotDetected);
-    CreateNative("WS_IsNoScopeDetected", Native_IsNoScopeDetected);
-    CreateNative("WS_GetSuspicionLevel", Native_GetSuspicionLevel);
-    CreateNative("WS_GetShotsFired", Native_GetShotsFired);
-    CreateNative("WS_GetShotsHit", Native_GetShotsHit);
-    CreateNative("WS_GetHeadshots", Native_GetHeadshots);
-    CreateNative("WS_GetAccuracy", Native_GetAccuracy);
-    CreateNative("WS_GetHeadshotRatio", Native_GetHeadshotRatio);
-    CreateNative("WS_GetKills", Native_GetKills);
-    CreateNative("WS_GetHeadshotKills", Native_GetHeadshotKills);
-    CreateNative("WS_GetWeaponCount", Native_GetWeaponCount);
-    CreateNative("WS_GetWeaponName", Native_GetWeaponName);
-    CreateNative("WS_GetWeaponShots", Native_GetWeaponShots);
-    CreateNative("WS_GetWeaponHits", Native_GetWeaponHits);
-    CreateNative("WS_GetWeaponHeadshots", Native_GetWeaponHeadshots);
+public void OnMapStart()
+{
+    PrecacheModel("sprites/laser.vmt");
+    PrecacheModel("sprites/glow01.vmt");
 }
 
 public void OnConfigsExecuted()
 {
-    // Hook ConVar changes
     g_cvEnabled.AddChangeHook(OnConVarChanged);
     g_cvDebug.AddChangeHook(OnConVarChanged);
     g_cvAdminFlags.AddChangeHook(OnConVarChanged);
@@ -260,8 +331,14 @@ public void OnConfigsExecuted()
     g_cvAimSnapAngle.AddChangeHook(OnConVarChanged);
     g_cvAimSnapDetections.AddChangeHook(OnConVarChanged);
     g_cvMaxAimVelocity.AddChangeHook(OnConVarChanged);
+    g_cvTracerDuration.AddChangeHook(OnConVarChanged);
+    g_cvGlowDistance.AddChangeHook(OnConVarChanged);
+    g_cvObserverAdminFlag.AddChangeHook(OnConVarChanged);
+    g_cvAimConsistency.AddChangeHook(OnConVarChanged);
+    g_cvAimTimeThreshold.AddChangeHook(OnConVarChanged);
+    g_cvMaxAngleChange.AddChangeHook(OnConVarChanged);
+    g_cvSmoothnessThreshold.AddChangeHook(OnConVarChanged);
     
-    // Update initial thresholds from ConVars
     UpdateThresholdsFromConVars();
 }
 
@@ -320,6 +397,8 @@ void UpdateThresholdsFromConVars()
         PrintToServer("[WeaponStats] - Aim Snap Angle: %.1f", g_cvAimSnapAngle.FloatValue);
         PrintToServer("[WeaponStats] - Aim Snap Detections: %d", g_cvAimSnapDetections.IntValue);
         PrintToServer("[WeaponStats] - Max Aim Velocity: %.1f", g_cvMaxAimVelocity.FloatValue);
+        PrintToServer("[WeaponStats] - Tracer Duration: %.1f", g_cvTracerDuration.FloatValue);
+        PrintToServer("[WeaponStats] - Glow Distance: %.1f", g_cvGlowDistance.FloatValue);
     }
 }
 
@@ -331,6 +410,12 @@ public void OnClientPutInServer(int client)
     
     g_ShotHistory[client] = new ArrayList(sizeof(ShotData));
     g_bIsTracking[client] = true;
+    
+    g_bObserving[client] = false;
+    g_iObservedTarget[client] = 0;
+    g_iGlowEntity[client] = INVALID_ENT_REFERENCE;
+    
+    SDKHook(client, SDKHook_WeaponEquipPost, OnWeaponEquipPost);
 }
 
 public void OnClientDisconnect(int client)
@@ -340,6 +425,26 @@ public void OnClientDisconnect(int client)
         delete g_ShotHistory[client];
     }
     
+    if (g_bObserving[client] && g_iObservedTarget[client] != 0)
+    {
+        StopObserving(client, true);
+    }
+    
+    if (g_hObservers[client].Length > 0)
+    {
+        for (int i = 0; i < g_hObservers[client].Length; i++)
+        {
+            int observer = g_hObservers[client].Get(i);
+            if (observer != client && IsClientInGame(observer) && g_bObserving[observer])
+            {
+                CPrintToChat(observer, "{fullred}[WeaponStats] {default}Your observed target has disconnected.");
+                StopObserving(observer, false);
+            }
+        }
+        g_hObservers[client].Clear();
+    }
+    
+    g_hTracers[client].Clear();
     ResetPlayerData(client);
     g_bIsTracking[client] = false;
 }
@@ -388,6 +493,7 @@ void ResetPlayerData(int client)
         g_iWeaponHits[client][i] = 0;
         g_iWeaponHeadshots[client][i] = 0;
     }
+    
     g_bSilentAimDetected[client] = false;
     g_bAimbotDetected[client] = false;
     g_bRecoilDetected[client] = false;
@@ -492,6 +598,327 @@ public Action Command_ResetStats(int client, int args)
     }
     
     return Plugin_Handled;
+}
+
+public Action Command_ObserveWeaponStats(int client, int args)
+{
+    if (!g_cvEnabled.BoolValue)
+    {
+        CReplyToCommand(client, "{fullred}[WeaponStats] {default}Plugin is disabled.");
+        return Plugin_Handled;
+    }
+    
+    if (!CheckObserverAdminAccess(client))
+    {
+        CReplyToCommand(client, "{fullred}[WeaponStats] {default}You don't have access to this command.");
+        return Plugin_Handled;
+    }
+    
+    if (!IsClientObserver(client))
+    {
+        CReplyToCommand(client, "{fullred}[WeaponStats] {default}You must be in spectator to use this command.");
+        return Plugin_Handled;
+    }
+    
+    if (args < 1)
+    {
+        ShowObserverMenu(client);
+        return Plugin_Handled;
+    }
+    
+    char targetArg[MAX_NAME_LENGTH];
+    GetCmdArg(1, targetArg, sizeof(targetArg));
+    
+    int target = FindTarget(client, targetArg, true, false);
+    if (target == -1)
+    {
+        return Plugin_Handled;
+    }
+    
+    if (!CanBeObserved(target))
+    {
+        CReplyToCommand(client, "{fullred}[WeaponStats] {default}Target must be a living player on Terrorist or Counter-Terrorist team.");
+        return Plugin_Handled;
+    }
+    
+    if (g_bObserving[client])
+    {
+        StopObserving(client, false);
+    }
+    
+    StartObserving(client, target);
+    
+    return Plugin_Handled;
+}
+
+public Action Command_StopObserving(int client, int args)
+{
+    if (g_bObserving[client])
+    {
+        StopObserving(client, false);
+        CReplyToCommand(client, "{fullred}[WeaponStats] {default}Stopped weapon statistics observation.");
+    }
+    else
+    {
+        CReplyToCommand(client, "{fullred}[WeaponStats] {default}You are not observing anyone.");
+    }
+    
+    return Plugin_Handled;
+}
+
+void ShowObserverMenu(int client)
+{
+    Menu menu = new Menu(MenuHandler_ObserverTarget);
+    menu.SetTitle("Select player to observe:");
+    
+    bool found = false;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (CanBeObserved(i))
+        {
+            char name[MAX_NAME_LENGTH], userid[16], display[MAX_NAME_LENGTH + 16];
+            GetClientName(i, name, sizeof(name));
+            IntToString(GetClientUserId(i), userid, sizeof(userid));
+            
+            int observerCount = g_hObservers[i].Length;
+            Format(display, sizeof(display), "%s (%d observers)", name, observerCount);
+            
+            menu.AddItem(userid, display);
+            found = true;
+        }
+    }
+    
+    if (!found)
+    {
+        menu.AddItem("", "No valid targets available", ITEMDRAW_DISABLED);
+    }
+    
+    menu.Display(client, 20);
+}
+
+public int MenuHandler_ObserverTarget(Menu menu, MenuAction action, int client, int param2)
+{
+    if (action == MenuAction_Select)
+    {
+        char userid[16];
+        menu.GetItem(param2, userid, sizeof(userid));
+        
+        int target = GetClientOfUserId(StringToInt(userid));
+        if (target != 0 && CanBeObserved(target))
+        {
+            if (g_bObserving[client])
+            {
+                StopObserving(client, false);
+            }
+            StartObserving(client, target);
+        }
+        else
+        {
+            CPrintToChat(client, "{fullred}[WeaponStats] {default}Target is no longer available.");
+        }
+    }
+    else if (action == MenuAction_End)
+    {
+        delete menu;
+    }
+    return 0;
+}
+
+void StartObserving(int observer, int target)
+{
+    g_bObserving[observer] = true;
+    g_iObservedTarget[observer] = target;
+    
+    if (g_hObservers[target].FindValue(observer) == -1)
+    {
+        g_hObservers[target].Push(observer);
+    }
+    
+    SetClientObserverTarget(observer, target);
+    
+    ApplyGlowEffect(target);
+    
+    char targetName[MAX_NAME_LENGTH];
+    GetClientName(target, targetName, sizeof(targetName));
+    
+    CPrintToChat(observer, "{fullred}[WeaponStats] {default}Now observing {green}%s{default}.", targetName);
+    CPrintToChat(observer, "{fullred}[WeaponStats] {default}You will see:\n- Team-colored glow {red}(Red=T, Blue=CT){default}\n- {yellow}Yellow bullet tracers{default}\n- Detailed damage logs");
+    CPrintToChat(observer, "{fullred}[WeaponStats] {default}Use {green}!stopobserving{default} to stop.");
+}
+
+void StopObserving(int observer, bool disconnect)
+{
+    int target = g_iObservedTarget[observer];
+    
+    if (target != 0 && IsClientInGame(target))
+    {
+        int index = g_hObservers[target].FindValue(observer);
+        if (index != -1)
+        {
+            g_hObservers[target].Erase(index);
+        }
+        
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && g_iTransparentPlayers[observer][i] == 1)
+            {
+                SetEntityRenderMode(i, RENDER_NORMAL);
+                SetEntityRenderColor(i, 255, 255, 255, 255);
+                g_iTransparentPlayers[observer][i] = 0;
+            }
+        }
+        
+        if (g_hObservers[target].Length == 0)
+        {
+            RemoveGlowEffect(target);
+        }
+        else
+        {
+            RestoreTransparency(target);
+        }
+    }
+    
+    g_bObserving[observer] = false;
+    g_iObservedTarget[observer] = 0;
+    
+    if (!disconnect)
+    {
+        if (IsClientInGame(observer) && IsClientObserver(observer))
+        {
+            SetEntProp(observer, Prop_Send, "m_iObserverMode", 1);
+            SetEntPropEnt(observer, Prop_Send, "m_hObserverTarget", -1);
+        }
+    }
+}
+
+void SetClientObserverTarget(int observer, int target)
+{
+    if (IsClientObserver(observer))
+    {
+        SetEntPropEnt(observer, Prop_Send, "m_hObserverTarget", target);
+        SetEntProp(observer, Prop_Send, "m_iObserverMode", 4);
+        
+        CreateTimer(0.1, Timer_ForceObserverUpdate, GetClientUserId(observer), TIMER_FLAG_NO_MAPCHANGE);
+    }
+}
+
+public Action Timer_ForceObserverUpdate(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client != 0 && IsClientInGame(client) && IsClientObserver(client))
+    {
+        SetEntProp(client, Prop_Send, "m_iObserverMode", 5);
+        SetEntProp(client, Prop_Send, "m_iObserverMode", 4);
+    }
+    return Plugin_Continue;
+}
+
+void ApplyGlowEffect(int target)
+{
+    g_bTransparencyApplied[target] = true;
+    
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && IsPlayerAlive(i) && i != target &&  (GetClientTeam(i) == CS_TEAM_T || GetClientTeam(i) == CS_TEAM_CT))
+        {
+            for (int j = 0; j < g_hObservers[target].Length; j++)
+            {
+                int observer = g_hObservers[target].Get(j);
+                if (IsClientInGame(observer) && IsClientObserver(observer))
+                {
+                    SetEntityRenderMode(i, RENDER_TRANSCOLOR);
+                    if (GetClientTeam(i) == CS_TEAM_T)
+                    {
+                        SetEntityRenderColor(i, 255, 50, 50, 128);
+                    }
+                    else
+                    {
+                        SetEntityRenderColor(i, 50, 50, 255, 128);
+                    }
+                    g_iTransparentPlayers[observer][i] = 1;
+                }
+            }
+        }
+    }
+    if (IsClientInGame(target) && IsPlayerAlive(target))
+    {
+        for (int i = 0; i < g_hObservers[target].Length; i++)
+        {
+            int observer = g_hObservers[target].Get(i);
+            if (IsClientInGame(observer) && IsClientObserver(observer))
+            {
+                SetEntityRenderMode(target, RENDER_NORMAL);
+                SetEntityRenderColor(target, 255, 255, 255, 255);
+                g_iTransparentPlayers[observer][target] = 0;
+            }
+        }
+    }
+}
+void RemoveGlowEffect(int target)
+{
+    if (g_hObservers[target].Length == 0 && g_bTransparencyApplied[target])
+    {
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i))
+            {
+                SetEntityRenderMode(i, RENDER_NORMAL);
+                SetEntityRenderColor(i, 255, 255, 255, 255);
+            }
+        }
+        g_bTransparencyApplied[target] = false;
+        if (g_iGlowEntity[target] != INVALID_ENT_REFERENCE)
+        {
+            int entity = EntRefToEntIndex(g_iGlowEntity[target]);
+            if (entity != INVALID_ENT_REFERENCE && IsValidEntity(entity))
+            {
+                AcceptEntityInput(entity, "Kill");
+            }
+            g_iGlowEntity[target] = INVALID_ENT_REFERENCE;
+        }
+    }
+}
+
+void RestoreTransparency(int target)
+{
+    if (!g_bTransparencyApplied[target] || g_hObservers[target].Length == 0) return;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && IsPlayerAlive(i) && i != target && 
+            (GetClientTeam(i) == CS_TEAM_T || GetClientTeam(i) == CS_TEAM_CT))
+        {
+            for (int j = 0; j < g_hObservers[target].Length; j++)
+            {
+                int observer = g_hObservers[target].Get(j);
+                if (IsClientInGame(observer) && IsClientObserver(observer))
+                {
+                    SetEntityRenderMode(i, RENDER_TRANSCOLOR);
+                    if (GetClientTeam(i) == CS_TEAM_T)
+                    {
+                        SetEntityRenderColor(i, 255, 50, 50, 128);
+                    }
+                    else
+                    {
+                        SetEntityRenderColor(i, 50, 50, 255, 128);
+                    }
+                    g_iTransparentPlayers[observer][i] = 1;
+                }
+            }
+        }
+    }
+    if (IsClientInGame(target) && IsPlayerAlive(target))
+    {
+        for (int i = 0; i < g_hObservers[target].Length; i++)
+        {
+            int observer = g_hObservers[target].Get(i);
+            if (IsClientInGame(observer) && IsClientObserver(observer))
+            {
+                SetEntityRenderMode(target, RENDER_NORMAL);
+                SetEntityRenderColor(target, 255, 255, 255, 255);
+                g_iTransparentPlayers[observer][target] = 0;
+            }
+        }
+    }
 }
 
 void DisplayWeaponStats(int client, int target)
@@ -763,8 +1190,7 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
     int victim = GetClientOfUserId(event.GetInt("userid"));
     
-    // CHANGED: Only check if ATTACKER is a bot, victim can be anything
-    if (attacker <= 0 || attacker > MaxClients || !IsClientInGame(attacker) || IsFakeClient(attacker) || 
+    if (attacker <= 0 || attacker > MaxClients || !IsClientInGame(attacker) || 
         victim <= 0 || victim > MaxClients || !IsClientInGame(victim) || attacker == victim) return;
     if (!g_bIsTracking[attacker]) return;
     
@@ -784,7 +1210,6 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     GetEntPropVector(victim, Prop_Data, "m_vecVelocity", vel);
     float speed = GetVectorLength(vel);
     
-    // CHANGED: Track consecutive hits even against bots
     if (speed >= 10.0)
     {
         g_iConsecutiveHits[attacker]++;
@@ -812,6 +1237,25 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     GetClientEyePosition(attacker, attackerPos);
     GetClientEyePosition(victim, victimPos);
     float distance = GetVectorDistance(attackerPos, victimPos);
+    int damage = event.GetInt("dmg_health");
+    if (g_hObservers[attacker].Length > 0)
+    {
+        for (int i = 0; i < g_hObservers[attacker].Length; i++)
+        {
+            int observer = g_hObservers[attacker].Get(i);
+            if (IsClientInGame(observer))
+            {
+                char damageKey[32];
+                Format(damageKey, sizeof(damageKey), "last_damage_%d", observer);
+                SetTrieValue(g_hDamageTrie, damageKey, damage);
+                
+                char victimKey[32];
+                Format(victimKey, sizeof(victimKey), "last_victim_%d", observer);
+                SetTrieValue(g_hDamageTrie, victimKey, victim);
+                UpdateCumulativeDamage(observer, victim, damage);
+            }
+        }
+    }
     
     int weaponIndex = GetWeaponIndex(attacker, weapon);
     if (weaponIndex != -1)
@@ -864,8 +1308,79 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
             g_ShotHistory[attacker].SetArray(lastIndex, data);
         }
     }
+    if (g_hObservers[attacker].Length > 0)
+    {
+        char hitgroupName[32];
+        GetHitgroupName(hitgroup, hitgroupName, sizeof(hitgroupName));
     
-    // CHANGED: Silent aim detection now works against bots too
+        float hitPos[3];
+        GetClientAbsOrigin(victim, hitPos);
+        
+        switch(hitgroup)
+        {
+            case 1: // Head
+                hitPos[2] += 72.0;
+            case 2: // Chest
+                hitPos[2] += 54.0;
+            case 3: // Stomach
+                hitPos[2] += 36.0;
+            case 4, 5: // Arms
+                hitPos[2] += 48.0;
+            case 6, 7: // Legs
+                hitPos[2] += 24.0;
+            default: // Generic
+                hitPos[2] += 48.0;
+        }
+        
+        hitPos[0] += GetRandomFloat(-5.0, 5.0);
+        hitPos[1] += GetRandomFloat(-5.0, 5.0);
+        
+        for (int i = 0; i < g_hObservers[attacker].Length; i++)
+        {
+            int observer = g_hObservers[attacker].Get(i);
+            if (IsClientInGame(observer) && IsClientObserver(observer))
+            {
+                char victimName[MAX_NAME_LENGTH];
+                GetClientName(victim, victimName, sizeof(victimName));
+                
+                // Chat messages
+                CPrintToChat(observer, "{fullred}[WeaponStats] {default}%N {lightgreen}hit{default} %s", attacker, victimName);
+                CPrintToChat(observer, "{fullred}[WeaponStats] {default}Weapon: {green}%s{default} | Scope: {green}%s{default}", weapon, IsPlayerScoped(attacker) ? "YES" : "NO");
+                CPrintToChat(observer, "{fullred}[WeaponStats] {default}Damage: {lightgreen}%d{default} | Hitgroup: {green}%s", damage, hitgroupName);
+                CPrintToChat(observer, " ");
+                
+                // Console detailed info with damage tracking
+                PrintToConsole(observer, " ");
+                PrintToConsole(observer, "=== WEAPON STATS - HIT DETECTION ===");
+                PrintToConsole(observer, "Attacker: %N", attacker);
+                PrintToConsole(observer, "Victim: %s", victimName);
+                PrintToConsole(observer, "Weapon: %s", weapon);
+                PrintToConsole(observer, "Scoped: %s", IsPlayerScoped(attacker) ? "Yes" : "No");
+                PrintToConsole(observer, "Damage: %d", damage);
+                PrintToConsole(observer, "Hitbox: %s (Index: %d)", hitgroupName, hitgroup);
+                PrintToConsole(observer, "Distance: %.1f units", distance);
+                PrintToConsole(observer, "Time: %.3f", GetGameTime());
+                
+                // Show cumulative damage if available
+                int totalDamage = GetCumulativeDamage(observer, victim);
+                if (totalDamage > 0)
+                {
+                    PrintToConsole(observer, "Total Damage to %s: %d", victimName, totalDamage);
+                }
+                
+                PrintToConsole(observer, "=====================================");
+                PrintToConsole(observer, " ");
+            
+                CreateHitMarkerOnVictim(observer, victim, hitgroup, victimPos, damage);
+                CreateServerImpactEffect(observer, victim, hitgroup);
+            }
+        }
+        if (g_bTransparencyApplied[attacker])
+        {
+            CreateTimer(0.1, Timer_RestoreTransparencyAfterDamage, GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
+        }
+    }
+    
     if (g_ShotHistory[attacker] != null && g_ShotHistory[attacker].Length > 0)
     {
         int lastIndex = g_ShotHistory[attacker].Length - 1;
@@ -894,7 +1409,6 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
         }
     }
     
-    // Add aim snap and velocity checks from SMAC/LILAC/KigenAC logic
     if (g_ShotHistory[attacker].Length >= 2)
     {
         int len = g_ShotHistory[attacker].Length;
@@ -927,14 +1441,23 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
         }
     }
     
-    // CHANGED: Run detection checks regardless of victim being bot
     PerformDetectionChecks(attacker);
     
     if (g_cvDebug.BoolValue)
     {
-        PrintToServer("[WeaponStats] %N hit %N with %s (Hitgroup: %d, Headshot: %s, Total Hits: %d, Distance: %.1f)", 
-            attacker, victim, weapon, hitgroup, isHeadshot ? "Yes" : "No", g_iShotsHit[attacker], distance);
+        PrintToServer("[WeaponStats] %N hit %N with %s (Hitgroup: %d, Headshot: %s, Total Hits: %d, Distance: %.1f, Damage: %d)", 
+            attacker, victim, weapon, hitgroup, isHeadshot ? "Yes" : "No", g_iShotsHit[attacker], distance, damage);
     }
+}
+
+public Action Timer_RestoreTransparencyAfterDamage(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client != 0 && IsClientInGame(client) && g_bTransparencyApplied[client])
+    {
+        RestoreTransparency(client);
+    }
+    return Plugin_Stop;
 }
 
 public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
@@ -944,29 +1467,274 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
     int attacker = GetClientOfUserId(event.GetInt("attacker"));
     int victim = GetClientOfUserId(event.GetInt("userid"));
     
-    // CHANGED: Only check if ATTACKER is a bot, victim can be anything
-    if (attacker <= 0 || attacker > MaxClients || !IsClientInGame(attacker) || IsFakeClient(attacker) || 
-        victim <= 0 || victim > MaxClients || !IsClientInGame(victim) || attacker == victim) return;
-    if (!g_bIsTracking[attacker]) return;
-    
-    g_iKills[attacker]++;
-    
-    int hitgroup = event.GetInt("hitgroup");
-    bool isHeadshot = (hitgroup == 1);
-    if (isHeadshot)
+    if (attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker) && !IsFakeClient(attacker) && 
+        victim > 0 && victim <= MaxClients && IsClientInGame(victim) && attacker != victim) 
     {
-        g_iHeadshotKills[attacker]++;
+        if (g_bIsTracking[attacker])
+        {
+            g_iKills[attacker]++;
+            
+            int hitgroup = event.GetInt("hitgroup");
+            bool isHeadshot = (hitgroup == 1);
+            if (isHeadshot)
+            {
+                g_iHeadshotKills[attacker]++;
+            }
+            
+            if (hitgroup >= 0 && hitgroup < 8)
+            {
+                g_iKillHitGroupStats[attacker][hitgroup]++;
+            }
+        }
+    }
+    if (victim > 0 && victim <= MaxClients && IsClientInGame(victim))
+    {
+        if (g_hObservers[victim].Length > 0 && g_bTransparencyApplied[victim])
+        {
+            for (int i = 0; i < g_hObservers[victim].Length; i++)
+            {
+                int observer = g_hObservers[victim].Get(i);
+                if (IsClientInGame(observer) && g_bObserving[observer])
+                {
+                    CPrintToChat(observer, "{fullred}[WeaponStats] {default}Your observed target has died. Observation will continue when they respawn.");
+                }
+            }
+            RemoveTransparencyTemporarily(victim);
+        }
+        ClearCumulativeDamageForVictim(victim);
     }
     
-    if (hitgroup >= 0 && hitgroup < 8)
+    if (g_cvDebug.BoolValue && attacker > 0 && attacker <= MaxClients && victim > 0 && victim <= MaxClients)
     {
-        g_iKillHitGroupStats[attacker][hitgroup]++;
+        int hitgroup = event.GetInt("hitgroup");
+        bool isHeadshot = (hitgroup == 1);
+        PrintToServer("[WeaponStats] %N killed %N (Hitgroup: %d, Headshot: %s, Total Kills: %d)", 
+            attacker, victim, hitgroup, isHeadshot ? "Yes" : "No", g_iKills[attacker]);
+    }
+}
+
+public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
+{
+    ClearAllCumulativeDamage();
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (g_hObservers[i].Length > 0 && g_bTransparencyApplied[i])
+        {
+            CreateTimer(2.0, Timer_DelayedTransparencyRestore, GetClientUserId(i), TIMER_FLAG_NO_MAPCHANGE);
+        }
     }
     
     if (g_cvDebug.BoolValue)
     {
-        PrintToServer("[WeaponStats] %N killed %N (Hitgroup: %d, Headshot: %s, Total Kills: %d)", 
-            attacker, victim, hitgroup, isHeadshot ? "Yes" : "No", g_iKills[attacker]);
+        PrintToServer("[WeaponStats] Round started - maintaining active observations");
+    }
+}
+
+public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_cvEnabled.BoolValue) return;
+    ClearAllCumulativeDamage();
+    if (g_cvDebug.BoolValue)
+    {
+        PrintToServer("[WeaponStats] Round ended - maintaining active observations");
+    }
+}
+
+public void Event_BulletImpact(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_cvEnabled.BoolValue) return;
+    
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client) || !g_bIsTracking[client]) return;
+    
+    float endPos[3];
+    endPos[0] = event.GetFloat("x");
+    endPos[1] = event.GetFloat("y");
+    endPos[2] = event.GetFloat("z");
+    
+    float startPos[3];
+    GetClientEyePosition(client, startPos);
+    
+    Handle trace = TR_TraceRayFilterEx(startPos, endPos, MASK_SHOT, RayType_EndPoint, Filter_Self, client);
+    
+    bool isMiss = true;
+    if (TR_DidHit(trace))
+    {
+        int hitEntity = TR_GetEntityIndex(trace);
+        if (hitEntity > 0 && hitEntity <= MaxClients && IsClientInGame(hitEntity))
+        {
+            isMiss = false;
+        }
+    }
+    
+    delete trace;
+    
+    if (isMiss)
+    {
+        g_iConsecutiveHits[client] = 0;
+    }
+    
+    if (g_hObservers[client].Length > 0)
+    {
+        CreateTracerEffect(client, endPos);
+    }
+    
+    if (g_cvDebug.BoolValue)
+    {
+        PrintToServer("[WeaponStats] Bullet impact by %N at (%.1f, %.1f, %.1f), Miss: %s", 
+            client, endPos[0], endPos[1], endPos[2], isMiss ? "Yes" : "No");
+    }
+}
+
+public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
+{
+    if (!g_cvEnabled.BoolValue) return;
+    
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    int oldTeam = event.GetInt("oldteam");
+    int newTeam = event.GetInt("team");
+    
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client)) return;
+    if ((oldTeam == CS_TEAM_T || oldTeam == CS_TEAM_CT) && (newTeam == CS_TEAM_SPECTATOR || newTeam == CS_TEAM_NONE))
+    {
+        if (g_hObservers[client].Length > 0)
+        {
+            for (int i = 0; i < g_hObservers[client].Length; i++)
+            {
+                int observer = g_hObservers[client].Get(i);
+                if (IsClientInGame(observer) && g_bObserving[observer])
+                {
+                    CPrintToChat(observer, "{fullred}[WeaponStats] {default}Your observed target has left the game. Observation stopped.");
+                    StopObserving(observer, false);
+                }
+            }
+            g_hObservers[client].Clear();
+        }
+        
+        RemoveGlowEffect(client);
+        
+        if (g_cvDebug.BoolValue)
+        {
+            PrintToServer("[WeaponStats] Player %N left the game, stopping all observations", client);
+        }
+    }
+    else if (newTeam == CS_TEAM_T || newTeam == CS_TEAM_CT)
+    {
+        if (g_hObservers[client].Length > 0)
+        {
+            CreateTimer(1.0, Timer_DelayedTransparencyRestore, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+            
+            if (g_cvDebug.BoolValue)
+            {
+                PrintToServer("[WeaponStats] Player %N joined a team, restoring transparency for observers", client);
+            }
+        }
+    }
+}
+
+public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
+{
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (client <= 0 || client > MaxClients || !IsClientInGame(client)) return;
+    if (g_hObservers[client].Length > 0 && g_bTransparencyApplied[client])
+    {
+        CreateTimer(1.0, Timer_DelayedTransparencyRestore, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+        for (int i = 0; i < g_hObservers[client].Length; i++)
+        {
+            int observer = g_hObservers[client].Get(i);
+            if (IsClientInGame(observer) && g_bObserving[observer])
+            {
+                CPrintToChat(observer, "{fullred}[WeaponStats] {default}Your observed target has respawned. Observation continues.");
+            }
+        }
+        
+        if (g_cvDebug.BoolValue)
+        {
+            PrintToServer("[WeaponStats] Player %N spawned, restoring transparency for observers", client);
+        }
+    }
+    if (g_bObserving[client] && g_iObservedTarget[client] != 0)
+    {
+        int target = g_iObservedTarget[client];
+        if (IsClientInGame(target) && g_bTransparencyApplied[target])
+        {
+            CreateTimer(1.0, Timer_DelayedTransparencyRestore, GetClientUserId(target), TIMER_FLAG_NO_MAPCHANGE);
+        }
+    }
+}
+
+void RemoveTransparencyTemporarily(int target)
+{
+    if (!g_bTransparencyApplied[target]) return;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i))
+        {
+            for (int j = 0; j < g_hObservers[target].Length; j++)
+            {
+                int observer = g_hObservers[target].Get(j);
+                if (IsClientInGame(observer))
+                {
+                    SetEntityRenderMode(i, RENDER_NORMAL);
+                    SetEntityRenderColor(i, 255, 255, 255, 255);
+                    g_iTransparentPlayers[observer][i] = 0;
+                }
+            }
+        }
+    }
+    
+    if (g_cvDebug.BoolValue)
+    {
+        PrintToServer("[WeaponStats] Temporarily removed transparency for dead target %N", target);
+    }
+}
+
+void ClearCumulativeDamageForVictim(int victim)
+{
+    for (int observer = 1; observer <= MaxClients; observer++)
+    {
+        if (IsClientInGame(observer))
+        {
+            char damageKey[32];
+            Format(damageKey, sizeof(damageKey), "total_damage_%d_%d", observer, victim);
+            RemoveFromTrie(g_hDamageTrie, damageKey);
+        }
+    }
+}
+
+void ClearAllCumulativeDamage()
+{
+    delete g_hDamageTrie;
+    g_hDamageTrie = CreateTrie();
+}
+
+public Action Timer_DelayedTransparencyRestore(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client != 0 && IsClientInGame(client) && g_bTransparencyApplied[client])
+    {
+        RestoreTransparency(client);
+    }
+    return Plugin_Stop;
+}
+
+public void OnWeaponEquipPost(int client, int weapon)
+{
+    if (g_hObservers[client].Length > 0 && IsValidEntity(weapon))
+    {
+        char weaponName[64];
+        GetEntityClassname(weapon, weaponName, sizeof(weaponName));
+        
+        ReplaceString(weaponName, sizeof(weaponName), "weapon_", "");
+        
+        for (int i = 0; i < g_hObservers[client].Length; i++)
+        {
+            int observer = g_hObservers[client].Get(i);
+            if (IsClientInGame(observer) && IsClientObserver(observer))
+            {
+                CPrintToChat(observer, "{fullred}[WeaponStats] {default}%N equipped: {green}%s", client, weaponName);
+            }
+        }
     }
 }
 
@@ -993,46 +1761,6 @@ public Action CheckMeleeMiss(Handle timer, int userid)
     return Plugin_Stop;
 }
 
-public void Event_BulletImpact(Event event, const char[] name, bool dontBroadcast)
-{
-    if (!g_cvEnabled.BoolValue) return;
-    
-    int client = GetClientOfUserId(event.GetInt("userid"));
-    if (client <= 0 || client > MaxClients || !IsClientInGame(client) || IsFakeClient(client) || !g_bIsTracking[client]) return;
-    
-    float startPos[3], endPos[3];
-    GetClientEyePosition(client, startPos);
-    endPos[0] = event.GetFloat("x");
-    endPos[1] = event.GetFloat("y");
-    endPos[2] = event.GetFloat("z");
-    
-    Handle trace = TR_TraceRayFilterEx(startPos, endPos, MASK_SHOT, RayType_EndPoint, Filter_Self, client);
-    
-    bool isMiss = true;
-    if (TR_DidHit(trace))
-    {
-        int hitEntity = TR_GetEntityIndex(trace);
-        // CHANGED: Accept hits on bots too
-        if (hitEntity > 0 && hitEntity <= MaxClients && IsClientInGame(hitEntity))
-        {
-            isMiss = false;
-        }
-    }
-    
-    delete trace;
-    
-    if (isMiss)
-    {
-        g_iConsecutiveHits[client] = 0;
-    }
-    
-    if (g_cvDebug.BoolValue)
-    {
-        PrintToServer("[WeaponStats] Bullet impact by %N at (%.1f, %.1f, %.1f), Miss: %s", 
-            client, endPos[0], endPos[1], endPos[2], isMiss ? "Yes" : "No");
-    }
-}
-
 public bool Filter_Self(int entity, int contentsMask, any data)
 {
     return entity != data;
@@ -1056,10 +1784,290 @@ public Action Timer_CheckEyeAngles(Handle timer)
     return Plugin_Continue;
 }
 
+public Action Timer_CleanupTracers(Handle timer)
+{
+    float currentTime = GetGameTime();
+    float tracerDuration = g_cvTracerDuration.FloatValue;
+    
+    for (int client = 1; client <= MaxClients; client++)
+    {
+        if (g_hTracers[client].Length > 0)
+        {
+            for (int i = g_hTracers[client].Length - 1; i >= 0; i--)
+            {
+                TracerData tracer;
+                g_hTracers[client].GetArray(i, tracer);
+                
+                if (currentTime - tracer.timestamp > tracerDuration)
+                {
+                    g_hTracers[client].Erase(i);
+                }
+            }
+        }
+    }
+    
+    return Plugin_Continue;
+}
+
+bool IsPlayerScoped(int client)
+{
+    if (!IsClientInGame(client) || !IsPlayerAlive(client))
+    {
+        return false;
+    }
+    return view_as<bool>(GetEntProp(client, Prop_Send, "m_bIsScoped"));
+}
+
+void CreateTracerEffect(int client, float endPos[3])
+{
+    float startPos[3];
+    GetClientEyePosition(client, startPos);
+    float eyeAngles[3], fwdVector[3];
+    GetClientEyeAngles(client, eyeAngles);
+    GetAngleVectors(eyeAngles, fwdVector, NULL_VECTOR, NULL_VECTOR);
+    ScaleVector(fwdVector, 10.0);
+    AddVectors(startPos, fwdVector, startPos);
+    
+    TracerData tracer;
+    tracer.startPos = startPos;
+    tracer.endPos = endPos;
+    tracer.timestamp = GetGameTime();
+    
+    g_hTracers[client].PushArray(tracer);
+    for (int i = 0; i < g_hObservers[client].Length; i++)
+    {
+        int observer = g_hObservers[client].Get(i);
+        if (IsClientInGame(observer) && IsClientObserver(observer))
+        {
+            
+            TE_SetupBeamPoints(startPos, endPos, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.2, 2.0, 2.0, 10, 0.0, g_iTracerColor, 3);
+            TE_SendToClient(observer);
+        }
+    }
+}
+
+
+void CreateHitMarkerOnVictim(int observer, int victim, int hitgroup, float hitPos[3], int damage)
+{
+    if (!IsClientInGame(observer) || !IsClientObserver(observer) || !IsClientInGame(victim)) return;
+    
+    int color[4];
+    char effectType[32];
+    switch(hitgroup)
+    {
+        case 1: // Head - Bright Red
+        {
+            color[0] = 255; color[1] = 0; color[2] = 0; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "HEAD");
+        }
+        case 2: // Chest - Bright Yellow  
+        {
+            color[0] = 255; color[1] = 255; color[2] = 0; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "CHEST");
+        }
+        case 3: // Stomach - Bright Orange
+        {
+            color[0] = 255; color[1] = 100; color[2] = 0; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "STOMACH");
+        }
+        case 4: // Left Arm - Bright Green
+        {
+            color[0] = 0; color[1] = 255; color[2] = 0; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "LEFT ARM");
+        }
+        case 5: // Right Arm - Bright Cyan
+        {
+            color[0] = 0; color[1] = 255; color[2] = 255; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "RIGHT ARM");
+        }
+        case 6: // Left Leg - Bright Purple
+        {
+            color[0] = 128; color[1] = 0; color[2] = 128; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "LEFT LEG");
+        }
+        case 7: // Right Leg - Bright Pink
+        {
+            color[0] = 255; color[1] = 0; color[2] = 255; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "RIGHT LEG");
+        }
+        default: // Generic - Bright White
+        {
+            color[0] = 255; color[1] = 255; color[2] = 255; color[3] = 255;
+            strcopy(effectType, sizeof(effectType), "GENERIC");
+        }
+    }
+    
+    // Get more accurate hit position based on hitgroup
+    float accurateHitPos[3];
+    GetClientAbsOrigin(victim, accurateHitPos);
+    switch(hitgroup)
+    {
+        case 1: // Head
+            accurateHitPos[2] += 72.0;
+        case 2: // Chest/Upper torso
+            accurateHitPos[2] += 54.0;
+        case 3: // Stomach/Lower torso
+            accurateHitPos[2] += 36.0;
+        case 4, 5: // Arms
+            accurateHitPos[2] += 48.0;
+        case 6, 7: // Legs
+            accurateHitPos[2] += 24.0;
+        default: // Generic
+            accurateHitPos[2] += 48.0;
+    }
+    accurateHitPos[0] += GetRandomFloat(-3.0, 3.0);
+    accurateHitPos[1] += GetRandomFloat(-3.0, 3.0);
+
+    TE_SetupGlowSprite(accurateHitPos, PrecacheModel("sprites/blueglow1.vmt"), 1.5, 0.8, 255);
+    TE_SendToClient(observer);
+    CreateHitboxOutline(observer, victim, hitgroup, accurateHitPos, color);
+    TE_SetupEnergySplash(accurateHitPos, NULL_VECTOR, false);
+    TE_SendToClient(observer);
+    int attacker = GetAttackerForObserver(observer);
+    if (attacker > 0 && attacker <= MaxClients && IsClientInGame(attacker))
+    {
+        float attackerPos[3];
+        GetClientEyePosition(attacker, attackerPos);
+        
+        float eyeAngles[3], fwd[3];
+        GetClientEyeAngles(attacker, eyeAngles);
+        GetAngleVectors(eyeAngles, fwd, NULL_VECTOR, NULL_VECTOR);
+        ScaleVector(fwd, 10.0);
+        AddVectors(attackerPos, fwd, attackerPos);
+        
+        TE_SetupBeamPoints(attackerPos, accurateHitPos, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.3, 2.0, 2.0, 0, 0.0, color, 3);
+        TE_SendToClient(observer);
+    }
+    
+    float textPos[3];
+    textPos[0] = accurateHitPos[0];
+    textPos[1] = accurateHitPos[1];
+    textPos[2] = accurateHitPos[2] + 15.0;
+    int damageColor[4] = {255, 255, 255, 255};
+    TE_SetupBeamRingPoint(textPos, 10.0, 20.0, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.5, 5.0, 0.0, damageColor, 10, 0);
+    TE_SendToClient(observer);
+    CreateHitgroupMarker(observer, accurateHitPos, hitgroup, color);
+    
+    if (g_cvDebug.BoolValue)
+    {
+        PrintToServer("[WeaponStats] Created hitbox visualization for observer %N: %s on %N, Damage: %d, Pos: (%.1f, %.1f, %.1f)", 
+            observer, effectType, victim, damage, accurateHitPos[0], accurateHitPos[1], accurateHitPos[2]);
+    }
+}
+
+void CreateHitboxOutline(int observer, int victim, int hitgroup, float centerPos[3], int color[4])
+{
+    float mins[3], maxs[3];
+    
+    // Define hitbox sizes based on hitgroup (CS:S approximate sizes)
+    switch(hitgroup)
+    {
+        case 1: // Head - smaller box
+        {
+            mins[0] = -4.0; mins[1] = -4.0; mins[2] = -4.0;
+            maxs[0] = 4.0; maxs[1] = 4.0; maxs[2] = 4.0;
+        }
+        case 2: // Chest - medium box
+        {
+            mins[0] = -6.0; mins[1] = -6.0; mins[2] = -8.0;
+            maxs[0] = 6.0; maxs[1] = 6.0; maxs[2] = 8.0;
+        }
+        case 3: // Stomach - medium box
+        {
+            mins[0] = -5.0; mins[1] = -5.0; mins[2] = -6.0;
+            maxs[0] = 5.0; maxs[1] = 5.0; maxs[2] = 6.0;
+        }
+        case 4, 5: // Arms - long thin box
+        {
+            mins[0] = -2.0; mins[1] = -2.0; mins[2] = -12.0;
+            maxs[0] = 2.0; maxs[1] = 2.0; maxs[2] = 12.0;
+        }
+        case 6, 7: // Legs - long thin box
+        {
+            mins[0] = -3.0; mins[1] = -3.0; mins[2] = -18.0;
+            maxs[0] = 3.0; maxs[1] = 3.0; maxs[2] = 18.0;
+        }
+        default: // Generic - medium box
+        {
+            mins[0] = -5.0; mins[1] = -5.0; mins[2] = -5.0;
+            maxs[0] = 5.0; maxs[1] = 5.0; maxs[2] = 5.0;
+        }
+    }
+    
+    // Create the 8 corners of the hitbox
+    float corners[8][3];
+    
+    // Bottom corners
+    corners[0][0] = centerPos[0] + mins[0]; corners[0][1] = centerPos[1] + mins[1]; corners[0][2] = centerPos[2] + mins[2];
+    corners[1][0] = centerPos[0] + maxs[0]; corners[1][1] = centerPos[1] + mins[1]; corners[1][2] = centerPos[2] + mins[2];
+    corners[2][0] = centerPos[0] + maxs[0]; corners[2][1] = centerPos[1] + maxs[1]; corners[2][2] = centerPos[2] + mins[2];
+    corners[3][0] = centerPos[0] + mins[0]; corners[3][1] = centerPos[1] + maxs[1]; corners[3][2] = centerPos[2] + mins[2];
+    
+    // Top corners
+    corners[4][0] = centerPos[0] + mins[0]; corners[4][1] = centerPos[1] + mins[1]; corners[4][2] = centerPos[2] + maxs[2];
+    corners[5][0] = centerPos[0] + maxs[0]; corners[5][1] = centerPos[1] + mins[1]; corners[5][2] = centerPos[2] + maxs[2];
+    corners[6][0] = centerPos[0] + maxs[0]; corners[6][1] = centerPos[1] + maxs[1]; corners[6][2] = centerPos[2] + maxs[2];
+    corners[7][0] = centerPos[0] + mins[0]; corners[7][1] = centerPos[1] + maxs[1]; corners[7][2] = centerPos[2] + maxs[2];
+    
+    DrawBoxEdge(observer, corners[0], corners[1], color); // Bottom front
+    DrawBoxEdge(observer, corners[1], corners[2], color); // Bottom right
+    DrawBoxEdge(observer, corners[2], corners[3], color); // Bottom back
+    DrawBoxEdge(observer, corners[3], corners[0], color); // Bottom left
+    
+    DrawBoxEdge(observer, corners[4], corners[5], color); // Top front
+    DrawBoxEdge(observer, corners[5], corners[6], color); // Top right
+    DrawBoxEdge(observer, corners[6], corners[7], color); // Top back
+    DrawBoxEdge(observer, corners[7], corners[4], color); // Top left
+    
+    DrawBoxEdge(observer, corners[0], corners[4], color); // Left front vertical
+    DrawBoxEdge(observer, corners[1], corners[5], color); // Right front vertical
+    DrawBoxEdge(observer, corners[2], corners[6], color); // Right back vertical
+    DrawBoxEdge(observer, corners[3], corners[7], color); // Left back vertical
+}
+
+void DrawBoxEdge(int observer, float start[3], float end[3], int color[4])
+{
+    TE_SetupBeamPoints(start, end, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.5, 2.0, 2.0, 0, 0.0, color, 3);
+    TE_SendToClient(observer);
+}
+
+void CreateHitgroupMarker(int observer, float pos[3], int hitgroup, int color[4])
+{
+    
+    // 1. Central glow
+    TE_SetupGlowSprite(pos, PrecacheModel("sprites/halo01.vmt"), 1.0, 0.6, 255);
+    TE_SendToClient(observer);
+    
+    // 2. Ring around hit area
+    TE_SetupBeamRingPoint(pos, 5.0, 25.0, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.4, 5.0, 0.0, color, 10, 0);
+    TE_SendToClient(observer);
+    
+    // 3. Vertical line through hit point
+    float topPos[3], bottomPos[3];
+    topPos[0] = pos[0]; topPos[1] = pos[1]; topPos[2] = pos[2] + 10.0;
+    bottomPos[0] = pos[0]; bottomPos[1] = pos[1]; bottomPos[2] = pos[2] - 10.0;
+    
+    TE_SetupBeamPoints(topPos, bottomPos, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.4, 3.0, 3.0, 0, 0.0, color, 3);
+    TE_SendToClient(observer);
+}
+
+int GetAttackerForObserver(int observer)
+{
+    if (!g_bObserving[observer]) return 0;
+    
+    int target = g_iObservedTarget[observer];
+    if (target > 0 && target <= MaxClients && IsClientInGame(target))
+    {
+        return target;
+    }
+    
+    return 0;
+}
+
 float GetAngleDelta(const float ang1[3], const float ang2[3])
 {
     float diff[3];
-    for (int i = 0; i < 2; i++) // Ignore roll
+    for (int i = 0; i < 2; i++)
     {
         diff[i] = ang2[i] - ang1[i];
         while (diff[i] > 180.0) diff[i] -= 360.0;
@@ -1093,11 +2101,51 @@ void PerformDetectionChecks(int client)
     float recoilControl = AnalyzeRecoilControl(client);
     bool aimlockDetected = DetectAimlock(client);
     bool silentAimDetected = DetectSilentAim(client);
+    float aimConsistency = CalculateAimConsistency(client);
+    float aimSmoothness = CalculateAimSmoothness(client);
+    bool perfectAim = DetectPerfectAim(client);
+    bool inhumanReaction = DetectInhumanReactionTime(client);
+    bool traceCheat = DetectTraceCheat(client);
     
     if (g_iShotsHit[client] > g_iShotsFired[client])
     {
         ReportSuspicion(client, "StatAnomaly", "Stat anomaly detected (Hits: %d, Shots: %d)", g_iShotsHit[client], g_iShotsFired[client]);
         g_iSuspicionLevel[client] += 5;
+    }
+
+    if (aimConsistency > g_cvAimConsistency.FloatValue && g_iShotsFired[client] > 20)
+    {
+        ReportSuspicion(client, "AimConsistency", "Unnatural aim consistency detected (%.1f%%)", aimConsistency * 100);
+        g_iSuspicionLevel[client] += 4;
+        g_bAimbotDetected[client] = true;
+    }
+
+    if (aimSmoothness > g_cvSmoothnessThreshold.FloatValue)
+    {
+        ReportSuspicion(client, "AimSmoothness", "Overly smooth aim movement detected (%.1f%%)", aimSmoothness * 100);
+        g_iSuspicionLevel[client] += 3;
+        g_bAimbotDetected[client] = true;
+    }
+
+    if (perfectAim)
+    {
+        ReportSuspicion(client, "PerfectAim", "Perfect aim detected (%d consecutive perfect frames)", g_iPerfectAimFrames[client]);
+        g_iSuspicionLevel[client] += 5;
+        g_bAimbotDetected[client] = true;
+    }
+
+    if (traceCheat)
+    {
+        ReportSuspicion(client, "TraceCheat", "Trace cheat detected (shooting through walls/obstacles)");
+        g_iSuspicionLevel[client] += 6;
+        g_bAimbotDetected[client] = true;
+    }
+
+    if (inhumanReaction)
+    {
+        ReportSuspicion(client, "InhumanReaction", "Inhuman reaction time detected");
+        g_iSuspicionLevel[client] += 4;
+        g_bTriggerbotDetected[client] = true;
     }
     
     bool highAccuracyWeapon = false;
@@ -1109,8 +2157,21 @@ void PerformDetectionChecks(int client)
             break;
         }
     }
+
+    float aimbotThreshold = highAccuracyWeapon ? (g_cvShotgunAimbotPerf ? g_cvShotgunAimbotPerf.FloatValue : 0.85) : (g_cvAimbotPerf ? g_cvAimbotPerf.FloatValue : 0.75);
+    if (accuracy >= aimbotThreshold && g_iShotsFired[client] > 30)
+    {
+        ReportSuspicion(client, "HighAccuracy", "Suspicious accuracy detected (%.1f%%)", accuracy * 100);
+        g_iSuspicionLevel[client] += 2;
+    }
+
+    if (headshotRatio > 0.7 && g_iShotsHit[client] > 20)
+    {
+        ReportSuspicion(client, "HighHeadshot", "Suspicious headshot ratio (%.1f%%)", headshotRatio * 100);
+        g_iSuspicionLevel[client] += 2;
+    }
     
-    float aimbotThreshold = highAccuracyWeapon ? g_cvShotgunAimbotPerf.FloatValue : g_cvAimbotPerf.FloatValue;
+    
     float headshotThreshold = highAccuracyWeapon ? g_cvShotgunHeadshotPerf.FloatValue : 0.6;
     
     if (accuracy >= aimbotThreshold)
@@ -1164,10 +2225,10 @@ void PerformDetectionChecks(int client)
         g_iSuspicionLevel[client] += 2;
     }
 
-    if (g_iConsecutiveHits[client] >= 5)
+    if (g_iConsecutiveHits[client] >= 8)
     {
         ReportSuspicion(client, "ConsecutiveHits", "High consecutive hits: %d", g_iConsecutiveHits[client]);
-        g_iSuspicionLevel[client] += 2;
+        g_iSuspicionLevel[client] += 1;
     }
     
     if (g_iSuspicionLevel[client] >= 5)
@@ -1212,6 +2273,109 @@ float CalculateAccuracy(int client)
     return fmin(1.0, float(g_iShotsHit[client]) / float(g_iShotsFired[client]));
 }
 
+float CalculateAimConsistency(int client)
+{
+    if (g_ShotHistory[client] == null || g_ShotHistory[client].Length < 10) return 0.0;
+    
+    int consistentShots = 0;
+    int totalComparisons = 0;
+    
+    for (int i = 2; i < g_ShotHistory[client].Length; i++)
+    {
+        ShotData current, prev1, prev2;
+        g_ShotHistory[client].GetArray(i, current);
+        g_ShotHistory[client].GetArray(i-1, prev1);
+        g_ShotHistory[client].GetArray(i-2, prev2);
+        
+        if (current.WasHit && prev1.WasHit && prev2.WasHit)
+        {
+            float angleDiff1 = GetAngleDelta(prev2.ShotAngles, prev1.ShotAngles);
+            float angleDiff2 = GetAngleDelta(prev1.ShotAngles, current.ShotAngles);
+            if (FloatAbs(angleDiff1 - angleDiff2) < 0.5)
+            {
+                consistentShots++;
+            }
+            totalComparisons++;
+        }
+    }
+    
+    return totalComparisons > 0 ? float(consistentShots) / float(totalComparisons) : 0.0;
+}
+
+float CalculateAimSmoothness(int client)
+{
+    if (g_iAimHistoryIndex[client] < 5) return 0.0;
+    
+    float totalSmoothness = 0.0;
+    int samples = 0;
+    
+    for (int i = 1; i < 10 && i < g_iAimHistoryIndex[client]; i++)
+    {
+        if (i >= 1)
+        {
+            float vel1 = CalculateAngularVelocity(g_vAimHistory[client][i-1], g_vAimHistory[client][i]);
+            float vel2 = CalculateAngularVelocity(g_vAimHistory[client][i], g_vAimHistory[client][i+1]);
+            float acceleration = FloatAbs(vel2 - vel1);
+            if (acceleration < 1.0)
+            {
+                totalSmoothness += 1.0;
+            }
+            samples++;
+        }
+    }
+    
+    return samples > 0 ? totalSmoothness / float(samples) : 0.0;
+}
+
+bool DetectPerfectAim(int client)
+{
+    if (g_ShotHistory[client] == null || g_ShotHistory[client].Length < 5) return false;
+    
+    int perfectFrames = 0;
+    float perfectThreshold = 0.1;
+    
+    for (int i = 1; i < g_ShotHistory[client].Length; i++)
+    {
+        ShotData current, previous;
+        g_ShotHistory[client].GetArray(i, current);
+        g_ShotHistory[client].GetArray(i-1, previous);
+        
+        if (current.WasHit && previous.WasHit)
+        {
+            float angleChange = GetAngleDelta(previous.ShotAngles, current.ShotAngles);
+            if (angleChange < perfectThreshold)
+            {
+                perfectFrames++;
+            }
+            else
+            {
+                perfectFrames = 0;
+            }
+        }
+        
+        if (perfectFrames >= 5)
+        {
+            g_iPerfectAimFrames[client] = perfectFrames;
+            return true;
+        }
+    }
+    
+    g_iPerfectAimFrames[client] = perfectFrames;
+    return false;
+}
+
+float CalculateAngularVelocity(const float ang1[3], const float ang2[3])
+{
+    float delta[3];
+    for (int i = 0; i < 3; i++)
+    {
+        delta[i] = ang2[i] - ang1[i];
+        while (delta[i] > 180.0) delta[i] -= 360.0;
+        while (delta[i] < -180.0) delta[i] += 360.0;
+    }
+    return SquareRoot(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]);
+}
+
 float CalculateHeadshotRatio(int client)
 {
     if (g_iShotsHit[client] == 0) return 0.0;
@@ -1220,10 +2384,33 @@ float CalculateHeadshotRatio(int client)
 
 float AnalyzeRecoilControl(int client)
 {
-    if (g_ShotHistory[client] == null || g_ShotHistory[client].Length < 10) return 0.0;
+    if (g_ShotHistory[client] == null || g_ShotHistory[client].Length < 5) return 0.0;
     
-    int validSamples = 0;
-    int perfectControl = 0;
+    int perfectShots = 0;
+    int totalShots = g_ShotHistory[client].Length;
+    
+    for (int i = 1; i < totalShots; i++)
+    {
+        ShotData current, previous;
+        g_ShotHistory[client].GetArray(i, current);
+        g_ShotHistory[client].GetArray(i - 1, previous);
+        
+        float delta = GetAngleDelta(previous.ShotAngles, current.ShotAngles);
+        if (delta < 0.5 && current.WasHit)
+        {
+            perfectShots++;
+        }
+    }
+    
+    return totalShots > 0 ? float(perfectShots) / float(totalShots) : 0.0;
+}
+
+bool DetectInhumanReactionTime(int client)
+{
+    if (g_ShotHistory[client] == null || g_ShotHistory[client].Length < 8) return false;
+    
+    int inhumanShots = 0;
+    int totalShots = 0;
     
     for (int i = 1; i < g_ShotHistory[client].Length; i++)
     {
@@ -1231,21 +2418,61 @@ float AnalyzeRecoilControl(int client)
         g_ShotHistory[client].GetArray(i, current);
         g_ShotHistory[client].GetArray(i-1, previous);
         
-        if (current.ShotTime - previous.ShotTime < 0.5 && current.HitEntity > 0)
+        if (current.WasHit && previous.WasHit && current.HitEntity > 0)
         {
-            validSamples++;
+            float timeBetween = current.ShotTime - previous.ShotTime;
+            float distance = current.Distance;
+            float minReactionTime = 0.05 + (distance / 5000.0);
             
-            float angleDiff = GetVectorDistance(current.ShotAngles, previous.ShotAngles);
-            
-            if (angleDiff < 0.5)
+            if (timeBetween < minReactionTime && distance > 300.0)
             {
-                perfectControl++;
+                inhumanShots++;
             }
+            totalShots++;
         }
     }
     
-    if (validSamples == 0) return 0.0;
-    return fmin(1.0, float(perfectControl) / float(validSamples));
+    return totalShots > 0 && (float(inhumanShots) / float(totalShots)) > 0.3;
+}
+
+bool DetectTraceCheat(int client)
+{
+    if (g_ShotHistory[client] == null) return false;
+    
+    int wallbangHits = 0;
+    int totalHits = 0;
+    
+    for (int i = 0; i < g_ShotHistory[client].Length; i++)
+    {
+        ShotData data;
+        g_ShotHistory[client].GetArray(i, data);
+        
+        if (data.WasHit && data.HitEntity > 0 && data.HitEntity <= MaxClients)
+        {
+            totalHits++;
+            float endPos[3];
+            GetClientEyePosition(data.HitEntity, endPos);
+            
+            Handle trace = TR_TraceRayFilterEx(data.EyePos, endPos, MASK_SHOT, RayType_EndPoint, TraceWallFilter, client);
+            
+            if (TR_DidHit(trace))
+            {
+                int hitEntity = TR_GetEntityIndex(trace);
+                if (hitEntity != data.HitEntity)
+                {
+                    char classname[64];
+                    GetEdictClassname(hitEntity, classname, sizeof(classname));
+                    if (StrContains(classname, "player") == -1 && hitEntity != 0)
+                    {
+                        wallbangHits++;
+                    }
+                }
+            }
+            
+            delete trace;
+        }
+    }
+    return totalHits > 5 && (float(wallbangHits) / float(totalHits)) > 0.3;
 }
 
 bool DetectAimlock(int client)
@@ -1578,6 +2805,23 @@ int CalculateTriggerbotSuspicion(int client)
     return 0;
 }
 
+public bool TraceWallFilter(int entity, int contentsMask, any data)
+{
+    return entity != data;
+}
+
+public Action Timer_UpdateAimHistory(Handle timer)
+{
+    for (int client = 1; client <= MaxClients; client++)
+    {
+        if (IsClientInGame(client) && IsPlayerAlive(client) && !IsFakeClient(client))
+        {
+            GetClientEyeAngles(client, g_vAimHistory[client][g_iAimHistoryIndex[client] % 10]);
+            g_iAimHistoryIndex[client]++;
+        }
+    }
+    return Plugin_Continue;
+}
 
 int CalculateNoScopeSuspicion(int client)
 {
@@ -1614,6 +2858,36 @@ void ReportSuspicion(int client, const char[] type, const char[] format, any ...
     GetClientAuthId(client, AuthId_Steam2, sAuth, sizeof(sAuth), true);
     VFormat(sLog, sizeof(sLog), format, 4);
     LogToFileEx(sPath, "[%s] %s [%s] - %s: %s", sTime, sName, sAuth, type, sLog);
+}
+
+bool CanBeObserved(int client)
+{
+    return IsClientInGame(client) && IsPlayerAlive(client) && (GetClientTeam(client) == CS_TEAM_T || GetClientTeam(client) == CS_TEAM_CT);
+}
+
+bool CheckObserverAdminAccess(int client)
+{
+    char flag[32];
+    g_cvObserverAdminFlag.GetString(flag, sizeof(flag));
+    
+    if (strlen(flag) == 0)
+    {
+        return true;
+    }
+    
+    return CheckCommandAccess(client, "sm_observeweaponstats", ReadFlagString(flag));
+}
+
+void GetHitgroupName(int hitgroup, char[] buffer, int maxlen)
+{
+    if (hitgroup >= 0 && hitgroup < sizeof(g_sHitgroupNames))
+    {
+        strcopy(buffer, maxlen, g_sHitgroupNames[hitgroup]);
+    }
+    else
+    {
+        strcopy(buffer, maxlen, "Unknown");
+    }
 }
 
 void AutoSendStatsToAdmins(int client, const char[] reason, int suspicionLevel)
@@ -2315,6 +3589,85 @@ public any Native_GetWeaponHeadshots(Handle plugin, int numParams)
     return g_iWeaponHeadshots[client][index];
 }
 
+int GetCumulativeDamage(int observer, int victim)
+{
+    char damageKey[32];
+    Format(damageKey, sizeof(damageKey), "total_damage_%d_%d", observer, victim);
+    
+    int totalDamage = 0;
+    GetTrieValue(g_hDamageTrie, damageKey, totalDamage);
+    return totalDamage;
+}
+
+void UpdateCumulativeDamage(int observer, int victim, int damage)
+{
+    char damageKey[32];
+    Format(damageKey, sizeof(damageKey), "total_damage_%d_%d", observer, victim);
+    
+    int currentDamage = 0;
+    GetTrieValue(g_hDamageTrie, damageKey, currentDamage);
+    currentDamage += damage;
+    SetTrieValue(g_hDamageTrie, damageKey, currentDamage);
+}
+
+void CreateServerImpactEffect(int observer, int victim, int hitgroup)
+{
+    if (!IsClientInGame(observer) || !IsClientInGame(victim)) return;
+    
+    float victimPos[3];
+    GetClientAbsOrigin(victim, victimPos);
+    
+    // Adjust position based on hitgroup
+    switch(hitgroup)
+    {
+        case 1: victimPos[2] += 72.0;
+        case 2: victimPos[2] += 54.0;
+        case 3: victimPos[2] += 36.0;
+        case 4, 5: victimPos[2] += 48.0;
+        case 6, 7: victimPos[2] += 24.0;
+        default: victimPos[2] += 48.0;
+    }
+    
+    int color[4];
+    
+    // Color based on hitgroup
+    switch(hitgroup)
+    {
+        case 1: { color[0] = 255; color[1] = 0; color[2] = 0; color[3] = 255; } // Red - Head
+        case 2: { color[0] = 255; color[1] = 255; color[2] = 0; color[3] = 255; } // Yellow - Chest
+        case 3: { color[0] = 255; color[1] = 100; color[2] = 0; color[3] = 255; } // Orange - Stomach
+        case 4, 5: { color[0] = 0; color[1] = 255; color[2] = 0; color[3] = 255; } // Green - Arms
+        case 6, 7: { color[0] = 0; color[1] = 0; color[2] = 255; color[3] = 255; } // Blue - Legs
+        default: { color[0] = 255; color[1] = 255; color[2] = 255; color[3] = 255; } // White - Generic
+    }
+
+    TE_SetupGlowSprite(victimPos, PrecacheModel("sprites/blueglow1.vmt"), 1.0, 0.5, 255);
+    TE_SendToClient(observer);
+    
+    // 2. Impact ring
+    TE_SetupBeamRingPoint(victimPos, 2.0, 15.0, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.3, 5.0, 0.0, color, 10, 0);
+    TE_SendToClient(observer);
+    CreateImpactCrosshair(observer, victimPos, color);
+}
+
+void CreateImpactCrosshair(int observer, float pos[3], int color[4])
+{
+    float crossSize = 8.0;
+    
+    // Horizontal line
+    float hStart[3], hEnd[3];
+    hStart[0] = pos[0] - crossSize; hStart[1] = pos[1]; hStart[2] = pos[2];
+    hEnd[0] = pos[0] + crossSize; hEnd[1] = pos[1]; hEnd[2] = pos[2];
+    TE_SetupBeamPoints(hStart, hEnd, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.2, 2.0, 2.0, 0, 0.0, color, 3);
+    TE_SendToClient(observer);
+    
+    // Vertical line
+    float vStart[3], vEnd[3];
+    vStart[0] = pos[0]; vStart[1] = pos[1] - crossSize; vStart[2] = pos[2];
+    vEnd[0] = pos[0]; vEnd[1] = pos[1] + crossSize; vEnd[2] = pos[2];
+    TE_SetupBeamPoints(vStart, vEnd, PrecacheModel("sprites/laser.vmt"), 0, 0, 0, 0.2, 2.0, 2.0, 0, 0.0, color, 3);
+    TE_SendToClient(observer);
+}
 
 /* Changlog
  * Version 1.00 - Initial Plugin written.
@@ -2394,4 +3747,10 @@ public any Native_GetWeaponHeadshots(Handle plugin, int numParams)
         - Updated the test plugin (`test_weaponstats.sp`) to version 1.1, now using the new natives to display detailed stats (shots, hits, headshots, accuracy, kills, and weapon-specific stats) in the console, eliminating the need to rely on `sm_wstats`.
         - Maintained existing detection logic and performance optimizations from version 1.8.
         - No changes to core detection algorithms or logging; focus was on enhancing API accessibility for other plugins.
+
+ * Version 1.11 - Added Bullet Tracers
+        - Added bullet tracers for silent aim and aimbot detections.
+        - Added Advanced Hitbox Visualization.
+        - Added Transparency system.
+        - Fixed bunch of stuffs.
 */
