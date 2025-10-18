@@ -8,7 +8,7 @@
 #include <discordWebhookAPI>
 #include <weaponstats>
 
-#define PLUGIN_VERSION "1.9"
+#define PLUGIN_VERSION "1.10"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
@@ -20,7 +20,7 @@ public Plugin myinfo =
     author = "+SyntX34",
     description = "Detects aimbot usage and tracks detailed weapon statistics for CS:Source",
     version = PLUGIN_VERSION,
-    url = ""
+    url = "https://github.com/SyntX34 && https://steamcommunity.com/id/SyntX34"
 };
 
 // ConVars
@@ -224,6 +224,18 @@ public void OnPluginStart()
     CreateNative("WS_IsTriggerbotDetected", Native_IsTriggerbotDetected);
     CreateNative("WS_IsNoScopeDetected", Native_IsNoScopeDetected);
     CreateNative("WS_GetSuspicionLevel", Native_GetSuspicionLevel);
+    CreateNative("WS_GetShotsFired", Native_GetShotsFired);
+    CreateNative("WS_GetShotsHit", Native_GetShotsHit);
+    CreateNative("WS_GetHeadshots", Native_GetHeadshots);
+    CreateNative("WS_GetAccuracy", Native_GetAccuracy);
+    CreateNative("WS_GetHeadshotRatio", Native_GetHeadshotRatio);
+    CreateNative("WS_GetKills", Native_GetKills);
+    CreateNative("WS_GetHeadshotKills", Native_GetHeadshotKills);
+    CreateNative("WS_GetWeaponCount", Native_GetWeaponCount);
+    CreateNative("WS_GetWeaponName", Native_GetWeaponName);
+    CreateNative("WS_GetWeaponShots", Native_GetWeaponShots);
+    CreateNative("WS_GetWeaponHits", Native_GetWeaponHits);
+    CreateNative("WS_GetWeaponHeadshots", Native_GetWeaponHeadshots);
 }
 
 public void OnConfigsExecuted()
@@ -2160,6 +2172,149 @@ public any Native_GetSuspicionLevel(Handle plugin, int numParams)
     return g_iSuspicionLevel[client];
 }
 
+public any Native_GetShotsFired(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return g_iShotsFired[client];
+}
+
+public any Native_GetShotsHit(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return g_iShotsHit[client];
+}
+
+public any Native_GetHeadshots(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return g_iHeadshots[client];
+}
+
+public any Native_GetAccuracy(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return CalculateAccuracy(client);
+}
+
+public any Native_GetHeadshotRatio(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return CalculateHeadshotRatio(client);
+}
+
+public any Native_GetKills(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return g_iKills[client];
+}
+
+public any Native_GetHeadshotKills(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return g_iHeadshotKills[client];
+}
+
+public any Native_GetWeaponCount(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    return g_iWeaponCount[client];
+}
+
+public any Native_GetWeaponName(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    int index = GetNativeCell(2);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    if (index < 0 || index >= g_iWeaponCount[client])
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid weapon index %d", index);
+    }
+    char weaponName[64];
+    strcopy(weaponName, sizeof(weaponName), g_sWeaponNames[client][index]);
+    SetNativeString(3, weaponName, GetNativeCell(4));
+    return true;
+}
+
+public any Native_GetWeaponShots(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    int index = GetNativeCell(2);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    if (index < 0 || index >= g_iWeaponCount[client])
+    {
+        return -1;
+    }
+    return g_iWeaponShots[client][index];
+}
+
+public any Native_GetWeaponHits(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    int index = GetNativeCell(2);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    if (index < 0 || index >= g_iWeaponCount[client])
+    {
+        return -1;
+    }
+    return g_iWeaponHits[client][index];
+}
+
+public any Native_GetWeaponHeadshots(Handle plugin, int numParams)
+{
+    int client = GetNativeCell(1);
+    int index = GetNativeCell(2);
+    if (client < 1 || client > MaxClients || !IsClientInGame(client))
+    {
+        ThrowNativeError(SP_ERROR_PARAM, "Invalid client index %d", client);
+    }
+    if (index < 0 || index >= g_iWeaponCount[client])
+    {
+        return -1;
+    }
+    return g_iWeaponHeadshots[client][index];
+}
+
 
 /* Changlog
  * Version 1.00 - Initial Plugin written.
@@ -2220,4 +2375,23 @@ public any Native_GetSuspicionLevel(Handle plugin, int numParams)
         - Optimized detection logic by maintaining existing aimlock detection (`DetectAimlock`) without changes, as it effectively catches consecutive perfect angle snaps.
         - Reduced false positives by leveraging existing conditions (e.g., movement, distance, multiple snap detections) from version 1.7, ensuring compatibility with new native-based queries.
         - No changes to core detection algorithms or stat tracking; focus was on adding native support for interoperability with other plugins.
+
+ * Version 1.10 - Enhanced Native Support for Detailed Stats
+        - Updated `weaponstats.inc` to include new natives for accessing detailed player statistics, removing limitations on stat access:
+        - `WS_GetShotsFired`: Returns total shots fired by the client.
+        - `WS_GetShotsHit`: Returns total shots hit by the client.
+        - `WS_GetHeadshots`: Returns total headshots by the client.
+        - `WS_GetAccuracy`: Returns the client's accuracy (hits/shots).
+        - `WS_GetHeadshotRatio`: Returns the client's headshot ratio (headshots/hits).
+        - `WS_GetKills`: Returns total kills by the client.
+        - `WS_GetHeadshotKills`: Returns total headshot kills by the client.
+        - `WS_GetWeaponCount`: Returns the number of weapons tracked for the client.
+        - `WS_GetWeaponName`: Retrieves the name of a weapon at a specific index.
+        - `WS_GetWeaponShots`: Returns shots fired for a specific weapon.
+        - `WS_GetWeaponHits`: Returns shots hit for a specific weapon.
+        - `WS_GetWeaponHeadshots`: Returns headshots for a specific weapon.
+        - Added native handlers for the new natives in `weaponstats.sp`, registered in `OnPluginStart`.
+        - Updated the test plugin (`test_weaponstats.sp`) to version 1.1, now using the new natives to display detailed stats (shots, hits, headshots, accuracy, kills, and weapon-specific stats) in the console, eliminating the need to rely on `sm_wstats`.
+        - Maintained existing detection logic and performance optimizations from version 1.8.
+        - No changes to core detection algorithms or logging; focus was on enhancing API accessibility for other plugins.
 */

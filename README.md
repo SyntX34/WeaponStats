@@ -51,6 +51,7 @@ The plugin tracks detailed statistics including:
 - `sm_weaponstats [target]` - Alias for sm_wstats
 - `sm_wresetstats [target]` - Reset weapon statistics for yourself or a target player
 - `sm_resetweaponstats [target]` - Alias for sm_wresetstats
+- `sm_testws [target]` - Test WeaponStats natives and display player stats (included test plugin)
 
 ## Configuration
 The plugin creates a configuration file with the following customizable ConVars:
@@ -78,6 +79,31 @@ The plugin creates a configuration file with the following customizable ConVars:
 | sm_weaponstats_aimsnap_detections | Aim snap detection threshold | 3 |
 | sm_weaponstats_max_aimvelocity | Max aim velocity (degrees/sec) | 1000.0 |
 
+## API/Natives for Developers
+The plugin includes a comprehensive API that allows other plugins to access WeaponStats data and detection statuses:
+
+- `WS_IsSilentAimDetected(client)` - Check if silent aim detected
+- `WS_IsAimbotDetected(client)` - Check if aimbot detected
+- `WS_IsRecoilDetected(client)` - Check if recoil cheat detected
+- `WS_IsAimlockDetected(client)` - Check if aimlock detected
+- `WS_IsTriggerbotDetected(client)` - Check if triggerbot detected
+- `WS_IsNoScopeDetected(client)` - Check if no-scope cheat detected
+- `WS_GetSuspicionLevel(client)` - Get overall suspicion level (0-10)
+- `WS_GetShotsFired(client)` - Get total shots fired
+- `WS_GetShotsHit(client)` - Get total shots hit
+- `WS_GetHeadshots(client)` - Get total headshots
+- `WS_GetAccuracy(client)` - Get accuracy ratio
+- `WS_GetHeadshotRatio(client)` - Get headshot ratio
+- `WS_GetKills(client)` - Get total kills
+- `WS_GetHeadshotKills(client)` - Get headshot kills
+- `WS_GetWeaponCount(client)` - Get number of tracked weapons
+- `WS_GetWeaponName(client, index, buffer, maxlen)` - Get weapon name at index
+- `WS_GetWeaponShots(client, index)` - Get shots for weapon at index
+- `WS_GetWeaponHits(client, index)` - Get hits for weapon at index
+- `WS_GetWeaponHeadshots(client, index)` - Get headshots for weapon at index
+
+A test plugin ([testws.smx](plugins\testws.smx)) is included to verify that all natives are working correctly. Use the `sm_testws` command to test the API functionality.
+
 ## How to Detect a Cheater
 The plugin automatically detects cheaters by analyzing various behavioral patterns:
 
@@ -98,9 +124,10 @@ When suspicious behavior is detected, the plugin:
 
 ## Installation
 1. Compile the .sp file and place the resulting .smx file in your `addons/sourcemod/plugins/` directory
-2. Place the [weaponstats.phrases.txt](translations/weaponstats.phrases.txt) file in your `addons/sourcemod/translations/` directory
+2. Place the [weaponstats.phrases.txt](translations\weaponstats.phrases.txt) file in your `addons/sourcemod/translations/` directory
 3. Restart the server or load the plugin
 4. Configure the ConVars in `cfg/sourcemod/weaponstats.cfg` as needed
+5. (Optional) Install the test plugin ([testws.smx](plugins\testws.smx)) to verify API functionality
 
 ## Requirements
 - SourceMod 1.10 or higher
@@ -123,6 +150,7 @@ When suspicious behavior is detected, the plugin:
 - Debug mode for troubleshooting and fine-tuning
 - Native support for integration with other plugins
 - Bot compatibility for comprehensive testing
+- API testing plugin included for verification
 
 ## Support
 For issues, feature requests, or questions, please open an issue on the project repository.
