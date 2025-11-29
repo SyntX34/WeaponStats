@@ -9,7 +9,7 @@
 #include <discordWebhookAPI>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.11"
+#define PLUGIN_VERSION "1.12"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
@@ -2309,19 +2309,21 @@ float CalculateAimSmoothness(int client)
     float totalSmoothness = 0.0;
     int samples = 0;
     
-    for (int i = 1; i < 10 && i < g_iAimHistoryIndex[client]; i++)
+    for (int i = 0; i < 9 && i < g_iAimHistoryIndex[client] - 1; i++)
     {
-        if (i >= 1)
+        int currentIndex = i % 10;
+        int nextIndex = (i + 1) % 10;
+        int prevIndex = (i - 1) % 10;
+        if (prevIndex < 0) prevIndex += 10;
+        
+        float vel1 = CalculateAngularVelocity(g_vAimHistory[client][prevIndex], g_vAimHistory[client][currentIndex]);
+        float vel2 = CalculateAngularVelocity(g_vAimHistory[client][currentIndex], g_vAimHistory[client][nextIndex]);
+        float acceleration = FloatAbs(vel2 - vel1);
+        if (acceleration < 1.0)
         {
-            float vel1 = CalculateAngularVelocity(g_vAimHistory[client][i-1], g_vAimHistory[client][i]);
-            float vel2 = CalculateAngularVelocity(g_vAimHistory[client][i], g_vAimHistory[client][i+1]);
-            float acceleration = FloatAbs(vel2 - vel1);
-            if (acceleration < 1.0)
-            {
-                totalSmoothness += 1.0;
-            }
-            samples++;
+            totalSmoothness += 1.0;
         }
+        samples++;
     }
     
     return samples > 0 ? totalSmoothness / float(samples) : 0.0;
@@ -2816,7 +2818,8 @@ public Action Timer_UpdateAimHistory(Handle timer)
     {
         if (IsClientInGame(client) && IsPlayerAlive(client) && !IsFakeClient(client))
         {
-            GetClientEyeAngles(client, g_vAimHistory[client][g_iAimHistoryIndex[client] % 10]);
+            int index = g_iAimHistoryIndex[client] % 10;
+            GetClientEyeAngles(client, g_vAimHistory[client][index]);
             g_iAimHistoryIndex[client]++;
         }
     }
@@ -3753,4 +3756,9 @@ void CreateImpactCrosshair(int observer, float pos[3], int color[4])
         - Added Advanced Hitbox Visualization.
         - Added Transparency system.
         - Fixed bunch of stuffs.
+
+ * Version 1.12 - Fixed:
+        - weaponstats.sp::CalculateAimSmoothness ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
+        - weaponstats.sp::PerformDetectionChecks ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
+        - weaponstats.sp::Event_PlayerHurt ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
 */
