@@ -9,7 +9,7 @@
 #include <discordWebhookAPI>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.12"
+#define PLUGIN_VERSION "1.13"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
@@ -2092,7 +2092,7 @@ float GetAimAngleDiff(const float angles[3], const float eyePos[3], const float 
 
 void PerformDetectionChecks(int client)
 {
-    if (g_iShotsFired[client] < 10 || IsFakeClient(client)) return;
+    if (g_iShotsFired[client] < 100 || IsFakeClient(client)) return;
     
     g_iSuspicionLevel[client] = 0;
     
@@ -2107,30 +2107,38 @@ void PerformDetectionChecks(int client)
     bool inhumanReaction = DetectInhumanReactionTime(client);
     bool traceCheat = DetectTraceCheat(client);
     
+    g_bAimbotDetected[client] = false;
+    g_bSilentAimDetected[client] = false;
+    g_bRecoilDetected[client] = false;
+    g_bAimlockDetected[client] = false;
+    g_bTriggerbotDetected[client] = false;
+    g_bNoScopeDetected[client] = false;
+    
     if (g_iShotsHit[client] > g_iShotsFired[client])
     {
         ReportSuspicion(client, "StatAnomaly", "Stat anomaly detected (Hits: %d, Shots: %d)", g_iShotsHit[client], g_iShotsFired[client]);
         g_iSuspicionLevel[client] += 5;
     }
 
-    if (aimConsistency > g_cvAimConsistency.FloatValue && g_iShotsFired[client] > 20)
+    if (aimConsistency > g_cvAimConsistency.FloatValue && g_iShotsFired[client] > 100)
     {
         ReportSuspicion(client, "AimConsistency", "Unnatural aim consistency detected (%.1f%%)", aimConsistency * 100);
-        g_iSuspicionLevel[client] += 4;
+        g_iSuspicionLevel[client] += 3; 
         g_bAimbotDetected[client] = true;
     }
 
     if (aimSmoothness > g_cvSmoothnessThreshold.FloatValue)
     {
         ReportSuspicion(client, "AimSmoothness", "Overly smooth aim movement detected (%.1f%%)", aimSmoothness * 100);
-        g_iSuspicionLevel[client] += 3;
+        g_iSuspicionLevel[client] += 2; 
         g_bAimbotDetected[client] = true;
     }
 
-    if (perfectAim)
+
+    if (perfectAim && g_iPerfectAimFrames[client] >= 8) 
     {
         ReportSuspicion(client, "PerfectAim", "Perfect aim detected (%d consecutive perfect frames)", g_iPerfectAimFrames[client]);
-        g_iSuspicionLevel[client] += 5;
+        g_iSuspicionLevel[client] += 4; 
         g_bAimbotDetected[client] = true;
     }
 
@@ -2144,7 +2152,7 @@ void PerformDetectionChecks(int client)
     if (inhumanReaction)
     {
         ReportSuspicion(client, "InhumanReaction", "Inhuman reaction time detected");
-        g_iSuspicionLevel[client] += 4;
+        g_iSuspicionLevel[client] += 3;
         g_bTriggerbotDetected[client] = true;
     }
     
@@ -2158,81 +2166,105 @@ void PerformDetectionChecks(int client)
         }
     }
 
-    float aimbotThreshold = highAccuracyWeapon ? (g_cvShotgunAimbotPerf ? g_cvShotgunAimbotPerf.FloatValue : 0.85) : (g_cvAimbotPerf ? g_cvAimbotPerf.FloatValue : 0.75);
-    if (accuracy >= aimbotThreshold && g_iShotsFired[client] > 30)
+    float aimbotThreshold = highAccuracyWeapon ? g_cvShotgunAimbotPerf.FloatValue : g_cvAimbotPerf.FloatValue;
+    if (accuracy >= aimbotThreshold && g_iShotsFired[client] > 50)
     {
         ReportSuspicion(client, "HighAccuracy", "Suspicious accuracy detected (%.1f%%)", accuracy * 100);
-        g_iSuspicionLevel[client] += 2;
+        g_iSuspicionLevel[client] += 1;
     }
 
-    if (headshotRatio > 0.7 && g_iShotsHit[client] > 20)
-    {
-        ReportSuspicion(client, "HighHeadshot", "Suspicious headshot ratio (%.1f%%)", headshotRatio * 100);
-        g_iSuspicionLevel[client] += 2;
-    }
-    
-    
-    float headshotThreshold = highAccuracyWeapon ? g_cvShotgunHeadshotPerf.FloatValue : 0.6;
+    float headshotThreshold = highAccuracyWeapon ? g_cvShotgunHeadshotPerf.FloatValue : g_cvHeadshotPerf.FloatValue;
     
     if (accuracy >= aimbotThreshold)
     {
         g_bAimbotDetected[client] = true;
         ReportSuspicion(client, "Aimbot", "Aimbot detected (Accuracy: %.1f%%, Threshold: %.1f%%)", 
             accuracy * 100, aimbotThreshold * 100);
-        g_iSuspicionLevel[client] += 3;
+        g_iSuspicionLevel[client] += 2; 
     }
     
     if (silentAimDetected)
     {
         g_bSilentAimDetected[client] = true;
         ReportSuspicion(client, "SilentAim", "Silent aim detected");
-        g_iSuspicionLevel[client] += 3;
+        g_iSuspicionLevel[client] += 2; 
     }
     
     if (aimlockDetected)
     {
         g_bAimlockDetected[client] = true;
         ReportSuspicion(client, "Aimlock", "Aimlock detected");
-        g_iSuspicionLevel[client] += 3;
+        g_iSuspicionLevel[client] += 2; 
     }
     
+    // STRICTER recoil control detection
     if (recoilControl >= g_cvRecoilPerf.FloatValue)
     {
         g_bRecoilDetected[client] = true;
         ReportSuspicion(client, "NoRecoil", "No-recoil detected (Recoil Control: %.1f%%, Threshold: %.1f%%)", 
             recoilControl * 100, g_cvRecoilPerf.FloatValue * 100);
-        g_iSuspicionLevel[client] += 3;
+        g_iSuspicionLevel[client] += 2; 
     }
     
     if (DetectInhumanReaction(client))
     {
         g_bTriggerbotDetected[client] = true;
         ReportSuspicion(client, "Triggerbot", "Triggerbot detected");
-        g_iSuspicionLevel[client] += 3; 
+        g_iSuspicionLevel[client] += 2; 
     }
     
     if (DetectNoScopeCheat(client))
     {
         g_bNoScopeDetected[client] = true;
         ReportSuspicion(client, "NoScope", "No-scope cheat detected");
-        g_iSuspicionLevel[client] += 3; 
+        g_iSuspicionLevel[client] += 2; 
     }
-    
-    if (headshotRatio >= headshotThreshold)
+
+    if (headshotRatio >= headshotThreshold && g_iShotsHit[client] > 30)
     {
         ReportSuspicion(client, "Headshot", "Suspicious headshot ratio (%.1f%%, Threshold: %.1f%%)", 
             headshotRatio * 100, headshotThreshold * 100);
-        g_iSuspicionLevel[client] += 2;
+        g_iSuspicionLevel[client] += 1; 
     }
 
-    if (g_iConsecutiveHits[client] >= 8)
+    if (g_iConsecutiveHits[client] >= 15)
     {
         ReportSuspicion(client, "ConsecutiveHits", "High consecutive hits: %d", g_iConsecutiveHits[client]);
         g_iSuspicionLevel[client] += 1;
     }
     
-    if (g_iSuspicionLevel[client] >= 5)
+    if (g_iSuspicionLevel[client] >= 8)
     {
+        int detectionTypes = 0;
+        if (g_bAimbotDetected[client]) detectionTypes++;
+        if (g_bSilentAimDetected[client]) detectionTypes++;
+        if (g_bRecoilDetected[client]) detectionTypes++;
+        if (g_bAimlockDetected[client]) detectionTypes++;
+        if (g_bTriggerbotDetected[client]) detectionTypes++;
+        if (g_bNoScopeDetected[client]) detectionTypes++;
+        
+        if (detectionTypes < 2)
+        {
+            if (g_cvDebug.BoolValue)
+            {
+                PrintToServer("[WeaponStats] %N suspicion reduced: only %d detection type(s), need 2+ for Discord", 
+                    client, detectionTypes);
+            }
+            g_iSuspicionLevel[client] = 7;
+            return;
+        }
+        
+        if ((g_bAimbotDetected[client] || g_bSilentAimDetected[client]) && accuracy < 0.90)
+        {
+            if (g_cvDebug.BoolValue)
+            {
+                PrintToServer("[WeaponStats] %N suspicion reduced: aim detection with only %.1f%% accuracy", 
+                    client, accuracy * 100);
+            }
+            g_iSuspicionLevel[client] = 7;
+            return;
+        }
+        
         float cooldown = g_cvNotifyCooldown.FloatValue;
         if (GetGameTime() - g_fLastNotifyTime[client] > cooldown)
         {
@@ -2253,8 +2285,8 @@ void PerformDetectionChecks(int client)
             
             if (g_cvDebug.BoolValue)
             {
-                PrintToServer("[WeaponStats] High suspicion for %N (Level: %d/10, Accuracy: %.1f%%, Headshot Ratio: %.1f%%)", 
-                    client, g_iSuspicionLevel[client], accuracy * 100, headshotRatio * 100);
+                PrintToServer("[WeaponStats] High suspicion for %N (Level: %d/10, Accuracy: %.1f%%, Headshot Ratio: %.1f%%, Detection Types: %d)", 
+                    client, g_iSuspicionLevel[client], accuracy * 100, headshotRatio * 100, detectionTypes);
             }
             
             Discord_Notify(client, "High Suspicion", g_iSuspicionLevel[client]);
@@ -3761,4 +3793,7 @@ void CreateImpactCrosshair(int observer, float pos[3], int color[4])
         - weaponstats.sp::CalculateAimSmoothness ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
         - weaponstats.sp::PerformDetectionChecks ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
         - weaponstats.sp::Event_PlayerHurt ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
+
+ * Version 1.13 - Added:
+        - Better Detection.
 */
