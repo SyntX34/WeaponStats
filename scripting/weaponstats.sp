@@ -9,7 +9,7 @@
 #include <discordWebhookAPI>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.13"
+#define PLUGIN_VERSION "1.12"
 #define MAX_TRACKED_SHOTS 1000
 #define SAMPLE_SIZE 50
 #define MAX_WEAPONS 32
@@ -106,6 +106,9 @@ ArrayList g_hTracers[MAXPLAYERS + 1];
 ArrayList g_ShotHistory[MAXPLAYERS+1];
 Handle g_hObserverCookie;
 Handle g_hDamageTrie;
+static float g_fLastObserverNotify[MAXPLAYERS+1];
+static float g_fLastDetectionCheck[MAXPLAYERS+1];
+static float g_fLastDebugPrint[MAXPLAYERS+1];
 
 enum struct ShotData {
     float ShotTime;
@@ -1073,6 +1076,8 @@ void DisplayWeaponStats(int client, int target)
 
 int GetWeaponIndex(int client, const char[] weaponName)
 {
+    if (g_iWeaponCount[client] >= MAX_WEAPONS) return -1;
+    
     char cleanedWeapon[64];
     if (StrContains(weaponName, "weapon_") == 0)
     {
@@ -1082,11 +1087,20 @@ int GetWeaponIndex(int client, const char[] weaponName)
     {
         strcopy(cleanedWeapon, sizeof(cleanedWeapon), weaponName);
     }
+    static char sLastWeapon[MAXPLAYERS+1][64];
+    static int iLastIndex[MAXPLAYERS+1] = {-1, ...};
+    
+    if (StrEqual(sLastWeapon[client], cleanedWeapon) && iLastIndex[client] != -1)
+    {
+        return iLastIndex[client];
+    }
     
     for (int i = 0; i < g_iWeaponCount[client]; i++)
     {
         if (StrEqual(g_sWeaponNames[client][i], cleanedWeapon))
         {
+            strcopy(sLastWeapon[client], sizeof(sLastWeapon[]), cleanedWeapon);
+            iLastIndex[client] = i;
             return i;
         }
     }
@@ -1095,6 +1109,8 @@ int GetWeaponIndex(int client, const char[] weaponName)
     {
         int index = g_iWeaponCount[client];
         strcopy(g_sWeaponNames[client][index], 64, cleanedWeapon);
+        strcopy(sLastWeapon[client], sizeof(sLastWeapon[]), cleanedWeapon);
+        iLastIndex[client] = index;
         g_iWeaponCount[client]++;
         return index;
     }
@@ -1193,19 +1209,28 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     if (attacker <= 0 || attacker > MaxClients || !IsClientInGame(attacker) || 
         victim <= 0 || victim > MaxClients || !IsClientInGame(victim) || attacker == victim) return;
     if (!g_bIsTracking[attacker]) return;
+    float currentTime = GetGameTime();
+    if (currentTime - g_fLastHitTime[attacker] < 0.1)
+    {
+        if (g_cvDebug.BoolValue)
+        {
+            PrintToServer("[WeaponStats] Skipping duplicate hit detection for %N (time diff: %.3f)", 
+                attacker, currentTime - g_fLastHitTime[attacker]);
+        }
+        return;
+    }
     
     if (g_iShotsHit[attacker] >= g_iShotsFired[attacker])
     {
         if (g_cvDebug.BoolValue)
         {
-            PrintToServer("[WeaponStats] Hit count (%d) exceeds shots fired (%d) for %N", g_iShotsHit[attacker], g_iShotsFired[attacker], attacker);
+            PrintToServer("[WeaponStats] Hit count anomaly prevented for %N (Hits: %d, Shots: %d)", 
+                attacker, g_iShotsHit[attacker], g_iShotsFired[attacker]);
         }
         return;
     }
-    
+    g_fLastHitTime[attacker] = currentTime;
     g_iShotsHit[attacker]++;
-    g_fLastHitTime[attacker] = GetGameTime();
-    
     float vel[3];
     GetEntPropVector(victim, Prop_Data, "m_vecVelocity", vel);
     float speed = GetVectorLength(vel);
@@ -1238,21 +1263,50 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     GetClientEyePosition(victim, victimPos);
     float distance = GetVectorDistance(attackerPos, victimPos);
     int damage = event.GetInt("dmg_health");
+    
     if (g_hObservers[attacker].Length > 0)
     {
-        for (int i = 0; i < g_hObservers[attacker].Length; i++)
+        static float g_fLastObserverNotify[MAXPLAYERS+1];
+        if (currentTime - g_fLastObserverNotify[attacker] > 0.5)
         {
-            int observer = g_hObservers[attacker].Get(i);
-            if (IsClientInGame(observer))
+            g_fLastObserverNotify[attacker] = currentTime;
+            
+            for (int i = 0; i < g_hObservers[attacker].Length; i++)
             {
-                char damageKey[32];
-                Format(damageKey, sizeof(damageKey), "last_damage_%d", observer);
-                SetTrieValue(g_hDamageTrie, damageKey, damage);
-                
-                char victimKey[32];
-                Format(victimKey, sizeof(victimKey), "last_victim_%d", observer);
-                SetTrieValue(g_hDamageTrie, victimKey, victim);
-                UpdateCumulativeDamage(observer, victim, damage);
+                int observer = g_hObservers[attacker].Get(i);
+                if (IsClientInGame(observer))
+                {
+                    char damageKey[32];
+                    Format(damageKey, sizeof(damageKey), "last_damage_%d", observer);
+                    SetTrieValue(g_hDamageTrie, damageKey, damage);
+                    
+                    char victimKey[32];
+                    Format(victimKey, sizeof(victimKey), "last_victim_%d", observer);
+                    SetTrieValue(g_hDamageTrie, victimKey, victim);
+                    UpdateCumulativeDamage(observer, victim, damage);
+                    
+                    if (damage >= 20 || isHeadshot)
+                    {
+                        char hitgroupName[32];
+                        GetHitgroupName(hitgroup, hitgroupName, sizeof(hitgroupName));
+                        char victimName[MAX_NAME_LENGTH];
+                        GetClientName(victim, victimName, sizeof(victimName));
+                        
+                        CPrintToChat(observer, "{fullred}[WeaponStats] {default}%N {lightgreen}hit{default} %s", attacker, victimName);
+                        CPrintToChat(observer, "{fullred}[WeaponStats] {default}Damage: {lightgreen}%d{default} | Hitgroup: {green}%s", damage, hitgroupName);
+                        
+                        if (damage >= 30 || isHeadshot)
+                        {
+                            CreateHitMarkerOnVictim(observer, victim, hitgroup, victimPos, damage);
+                            CreateServerImpactEffect(observer, victim, hitgroup);
+                        }
+                    }
+                }
+            }
+            
+            if (g_bTransparencyApplied[attacker])
+            {
+                CreateTimer(0.1, Timer_RestoreTransparencyAfterDamage, GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
             }
         }
     }
@@ -1260,34 +1314,37 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
     int weaponIndex = GetWeaponIndex(attacker, weapon);
     if (weaponIndex != -1)
     {
-        if (g_iWeaponHits[attacker][weaponIndex] < g_iWeaponShots[attacker][weaponIndex])
+        if (g_iWeaponHits[attacker][weaponIndex] >= g_iWeaponShots[attacker][weaponIndex])
+        {
+            if (g_cvDebug.BoolValue)
+            {
+                PrintToServer("[WeaponStats] Weapon %s hit count anomaly for %N (Hits: %d, Shots: %d)", 
+                    g_sWeaponNames[attacker][weaponIndex], attacker, 
+                    g_iWeaponHits[attacker][weaponIndex], g_iWeaponShots[attacker][weaponIndex]);
+            }
+        }
+        else
         {
             if (StrEqual(weapon, "m3") || StrEqual(weapon, "xm1014"))
             {
-                if (g_iWeaponHits[attacker][weaponIndex] < g_iWeaponShots[attacker][weaponIndex])
+                if (g_iWeaponHits[attacker][weaponIndex] < g_iWeaponShots[attacker][weaponIndex] * 3)
                 {
                     g_iWeaponHits[attacker][weaponIndex]++;
                 }
             }
             else
             {
-                g_iWeaponHits[attacker][weaponIndex]++;
+                if (g_iWeaponHits[attacker][weaponIndex] < g_iWeaponShots[attacker][weaponIndex])
+                {
+                    g_iWeaponHits[attacker][weaponIndex]++;
+                }
             }
+            
             if (isHeadshot)
             {
                 g_iWeaponHeadshots[attacker][weaponIndex]++;
             }
         }
-        else if (g_cvDebug.BoolValue)
-        {
-            PrintToServer("[WeaponStats] Weapon %s hit count (%d) exceeds shots (%d) for %N", g_sWeaponNames[attacker][weaponIndex], 
-                g_iWeaponHits[attacker][weaponIndex], g_iWeaponShots[attacker][weaponIndex], attacker);
-        }
-    }
-    
-    if (g_bPendingMelee[attacker] && StrContains(weapon, "knife") != -1)
-    {
-        g_bPendingMelee[attacker] = false;
     }
     
     if (g_ShotHistory[attacker] != null && g_ShotHistory[attacker].Length > 0)
@@ -1295,158 +1352,57 @@ public void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
         int lastIndex = g_ShotHistory[attacker].Length - 1;
         ShotData data;
         g_ShotHistory[attacker].GetArray(lastIndex, data);
-        
-        if (StrEqual(data.Weapon, weapon))
+        if (StrEqual(data.Weapon, weapon) && currentTime - data.ShotTime < 0.5)
         {
-            data.WasHit = true;
-            data.WasHeadshot = isHeadshot;
-            data.HitEntity = victim;
-            data.HitGroup = hitgroup;
-            data.HitPos = victimPos;
-            data.Distance = distance;
-            
-            g_ShotHistory[attacker].SetArray(lastIndex, data);
-        }
-    }
-    if (g_hObservers[attacker].Length > 0)
-    {
-        char hitgroupName[32];
-        GetHitgroupName(hitgroup, hitgroupName, sizeof(hitgroupName));
-    
-        float hitPos[3];
-        GetClientAbsOrigin(victim, hitPos);
-        
-        switch(hitgroup)
-        {
-            case 1: // Head
-                hitPos[2] += 72.0;
-            case 2: // Chest
-                hitPos[2] += 54.0;
-            case 3: // Stomach
-                hitPos[2] += 36.0;
-            case 4, 5: // Arms
-                hitPos[2] += 48.0;
-            case 6, 7: // Legs
-                hitPos[2] += 24.0;
-            default: // Generic
-                hitPos[2] += 48.0;
-        }
-        
-        hitPos[0] += GetRandomFloat(-5.0, 5.0);
-        hitPos[1] += GetRandomFloat(-5.0, 5.0);
-        
-        for (int i = 0; i < g_hObservers[attacker].Length; i++)
-        {
-            int observer = g_hObservers[attacker].Get(i);
-            if (IsClientInGame(observer) && IsClientObserver(observer))
+            if (!data.WasHit)
             {
-                char victimName[MAX_NAME_LENGTH];
-                GetClientName(victim, victimName, sizeof(victimName));
+                data.WasHit = true;
+                data.WasHeadshot = isHeadshot;
+                data.HitEntity = victim;
+                data.HitGroup = hitgroup;
+                data.HitPos = victimPos;
+                data.Distance = distance;
                 
-                // Chat messages
-                CPrintToChat(observer, "{fullred}[WeaponStats] {default}%N {lightgreen}hit{default} %s", attacker, victimName);
-                CPrintToChat(observer, "{fullred}[WeaponStats] {default}Weapon: {green}%s{default} | Scope: {green}%s{default}", weapon, IsPlayerScoped(attacker) ? "YES" : "NO");
-                CPrintToChat(observer, "{fullred}[WeaponStats] {default}Damage: {lightgreen}%d{default} | Hitgroup: {green}%s", damage, hitgroupName);
-                CPrintToChat(observer, " ");
+                g_ShotHistory[attacker].SetArray(lastIndex, data);
                 
-                // Console detailed info with damage tracking
-                PrintToConsole(observer, " ");
-                PrintToConsole(observer, "=== WEAPON STATS - HIT DETECTION ===");
-                PrintToConsole(observer, "Attacker: %N", attacker);
-                PrintToConsole(observer, "Victim: %s", victimName);
-                PrintToConsole(observer, "Weapon: %s", weapon);
-                PrintToConsole(observer, "Scoped: %s", IsPlayerScoped(attacker) ? "Yes" : "No");
-                PrintToConsole(observer, "Damage: %d", damage);
-                PrintToConsole(observer, "Hitbox: %s (Index: %d)", hitgroupName, hitgroup);
-                PrintToConsole(observer, "Distance: %.1f units", distance);
-                PrintToConsole(observer, "Time: %.3f", GetGameTime());
+                float eyePos[3], fwdVector[3], dir[3];
+                eyePos = data.EyePos;
                 
-                // Show cumulative damage if available
-                int totalDamage = GetCumulativeDamage(observer, victim);
-                if (totalDamage > 0)
+                SubtractVectors(victimPos, eyePos, dir);
+                NormalizeVector(dir, dir);
+                
+                GetAngleVectors(data.ShotAngles, fwdVector, NULL_VECTOR, NULL_VECTOR);
+                NormalizeVector(fwdVector, fwdVector);
+                
+                float dot = GetVectorDotProduct(dir, fwdVector);
+                float angleDiff = ArcCosine(FloatAbs(dot)) * (180.0 / 3.14159);
+                
+                if (angleDiff > g_cvSilentAimAngle.FloatValue && speed >= 10.0 && distance > g_cvCloseRange.FloatValue)
                 {
-                    PrintToConsole(observer, "Total Damage to %s: %d", victimName, totalDamage);
+                    ReportSuspicion(attacker, "SilentAim", "Silent aim detected (Angle: %.1f°, Distance: %.1f units)", angleDiff, distance);
+                    g_iSuspicionLevel[attacker] += 3;
                 }
-                
-                PrintToConsole(observer, "=====================================");
-                PrintToConsole(observer, " ");
-            
-                CreateHitMarkerOnVictim(observer, victim, hitgroup, victimPos, damage);
-                CreateServerImpactEffect(observer, victim, hitgroup);
             }
         }
-        if (g_bTransparencyApplied[attacker])
-        {
-            CreateTimer(0.1, Timer_RestoreTransparencyAfterDamage, GetClientUserId(attacker), TIMER_FLAG_NO_MAPCHANGE);
-        }
     }
-    
-    if (g_ShotHistory[attacker] != null && g_ShotHistory[attacker].Length > 0)
+    static float g_fLastDetectionCheck[MAXPLAYERS+1];
+    if (currentTime - g_fLastDetectionCheck[attacker] > 1.0)
     {
-        int lastIndex = g_ShotHistory[attacker].Length - 1;
-        ShotData data;
-        g_ShotHistory[attacker].GetArray(lastIndex, data);
-        
-        if (FloatAbs(data.ShotTime - g_fLastShotTime[attacker]) < 0.1 && StrEqual(data.Weapon, weapon))
-        {
-            float eyePos[3], fwdVector[3], dir[3];
-            eyePos = data.EyePos;
-            
-            SubtractVectors(victimPos, eyePos, dir);
-            NormalizeVector(dir, dir);
-            
-            GetAngleVectors(data.ShotAngles, fwdVector, NULL_VECTOR, NULL_VECTOR);
-            NormalizeVector(fwdVector, fwdVector);
-            
-            float dot = GetVectorDotProduct(dir, fwdVector);
-            float angleDiff = ArcCosine(FloatAbs(dot)) * (180.0 / 3.14159);
-            
-            if (angleDiff > g_cvSilentAimAngle.FloatValue && speed >= 10.0 && data.Distance > g_cvCloseRange.FloatValue)
-            {
-                ReportSuspicion(attacker, "SilentAim", "Silent aim detected (Angle: %.1f°, Distance: %.1f units)", angleDiff, data.Distance);
-                g_iSuspicionLevel[attacker] += 3;
-            }
-        }
+        g_fLastDetectionCheck[attacker] = currentTime;
+        PerformDetectionChecks(attacker);
     }
     
-    if (g_ShotHistory[attacker].Length >= 2)
-    {
-        int len = g_ShotHistory[attacker].Length;
-        ShotData current, previous;
-        g_ShotHistory[attacker].GetArray(len - 1, current);
-        g_ShotHistory[attacker].GetArray(len - 2, previous);
-        
-        float delta = GetAngleDelta(previous.ShotAngles, current.ShotAngles);
-        float timeDiff = current.ShotTime - previous.ShotTime;
-        
-        if (timeDiff > 0.0)
-        {
-            float velocity = delta / timeDiff;
-            if (velocity > g_cvMaxAimVelocity.FloatValue)
-            {
-                ReportSuspicion(attacker, "AimVelocity", "High aim velocity detected (%.1f deg/s)", velocity);
-                g_iSuspicionLevel[attacker] += 3;
-            }
-        }
-        
-        float angleDiff = GetAimAngleDiff(current.ShotAngles, current.EyePos, current.HitPos);
-        if (delta > g_cvAimSnapAngle.FloatValue && angleDiff < 0.5 && speed >= 10.0 && distance > g_cvCloseRange.FloatValue)
-        {
-            g_iAimSnapDetections[attacker]++;
-            if (g_iAimSnapDetections[attacker] >= g_cvAimSnapDetections.IntValue)
-            {
-                ReportSuspicion(attacker, "AimSnap", "Aimbot snap detected (delta: %.1f°)", delta);
-                g_iSuspicionLevel[attacker] += 5;
-            }
-        }
-    }
-    
-    PerformDetectionChecks(attacker);
-    
+    // Debug logging with rate limiting
     if (g_cvDebug.BoolValue)
     {
-        PrintToServer("[WeaponStats] %N hit %N with %s (Hitgroup: %d, Headshot: %s, Total Hits: %d, Distance: %.1f, Damage: %d)", 
-            attacker, victim, weapon, hitgroup, isHeadshot ? "Yes" : "No", g_iShotsHit[attacker], distance, damage);
+        static float g_fLastDebugPrint[MAXPLAYERS+1];
+        if (currentTime - g_fLastDebugPrint[attacker] > 2.0)
+        {
+            g_fLastDebugPrint[attacker] = currentTime;
+            PrintToServer("[WeaponStats] %N hit %N with %s (Hitgroup: %d, Headshot: %s, Total Hits: %d/%d, Distance: %.1f, Damage: %d)", 
+                attacker, victim, weapon, hitgroup, isHeadshot ? "Yes" : "No", 
+                g_iShotsHit[attacker], g_iShotsFired[attacker], distance, damage);
+        }
     }
 }
 
@@ -3793,7 +3749,4 @@ void CreateImpactCrosshair(int observer, float pos[3], int color[4])
         - weaponstats.sp::CalculateAimSmoothness ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
         - weaponstats.sp::PerformDetectionChecks ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
         - weaponstats.sp::Event_PlayerHurt ([SM] Exception reported: Array index out-of-bounds (index 10, limit 10))
-
- * Version 1.13 - Added:
-        - Better Detection.
 */
